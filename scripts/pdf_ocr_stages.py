@@ -754,6 +754,8 @@ def main():
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--layout-overrides", type=Path, default=Path("state/pdf_ocr_layout.json"))
     parser.add_argument("--assets-repo", default="vomebook/Reader-Assets")
+    parser.add_argument("--source-repo", default="")
+    parser.add_argument("--source-path-prefix", default="")
     args = parser.parse_args()
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     repo = args.assets_repo
@@ -766,7 +768,11 @@ def main():
             assets = load_registry(api, repo, "manifest.json", revision)
             assets["revision"] = revision
             range_state = load_registry(api, repo, "pdf_range_manifest.json", revision)
-            records = pdf_ocr.source_records(args.search_data, args.revisions, assets, range_manifest=range_state)
+            records = pdf_ocr.source_records(args.search_data, args.revisions, assets,
+                                             repo=args.source_repo, range_manifest=range_state)
+            if args.source_path_prefix:
+                records = [item for item in records
+                           if str(item.get("path", "")).startswith(args.source_path_prefix)]
             records = pending_render(records, rendered, current, args.retry_failed, args.partition)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream)

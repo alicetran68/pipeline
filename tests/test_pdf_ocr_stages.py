@@ -402,6 +402,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
         self.assertIn("plan-render --partition large --native-text-stream", large)
         self.assertIn("plan-render --partition small --native-text-stream", small)
+        self.assertIn("--source-repo", small)
+        self.assertIn("--source-path-prefix", small)
         self.assertIn("group: pdf-render-small-inputs", small)
         self.assertIn("group: reader-assets", small)
 
