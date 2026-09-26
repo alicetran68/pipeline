@@ -781,6 +781,12 @@ def main():
             queue = plan_render_ranges(queue, render_progress)
         else:
             progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
+            if args.source_repo:
+                rendered = {key: value for key, value in rendered.items()
+                            if value.get("repo") == args.source_repo}
+            if args.source_path_prefix:
+                rendered = {key: value for key, value in rendered.items()
+                            if str(value.get("path", "")).startswith(args.source_path_prefix)}
             overrides = json.loads(args.layout_overrides.read_text(encoding="utf-8")) if args.layout_overrides.is_file() else {}
             queue = plan_images(rendered, current, progress, args.limit,
                                 plan_pdf_ocr.ocr_target_pages_per_shard(), overrides,

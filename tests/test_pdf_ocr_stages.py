@@ -404,6 +404,9 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("plan-render --partition small --native-text-stream", small)
         self.assertIn("--source-repo", small)
         self.assertIn("--source-path-prefix", small)
+        ocr = (root / ".github/workflows/pdf-ocr-assets.yml").read_text()
+        self.assertIn("--source-repo", ocr)
+        self.assertIn("--source-path-prefix", ocr)
         self.assertIn("group: pdf-render-small-inputs", small)
         self.assertIn("group: reader-assets", small)
 
