@@ -306,7 +306,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                    if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
-            lin_pdf_text.pymupdf.open(source) if lin_native else nullcontext(None)) as document:
+            lin_pdf_text.open_pdf(source) if lin_native else nullcontext(None)) as document:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text" and not force_image_render:
                 text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)

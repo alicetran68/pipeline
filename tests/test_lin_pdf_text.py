@@ -1,5 +1,7 @@
 import gzip
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,12 @@ from tests.test_repair_gbk_pdf import fixture
 
 
 class LinPdfTextTests(unittest.TestCase):
+    def test_ocr_worker_import_does_not_require_mupdf(self):
+        result = subprocess.run([sys.executable, "-c",
+                                 'import sys; sys.modules["pymupdf"] = None; import scripts.pdf_ocr_stages'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_planner_marks_only_supported_native_text(self):
         item = {"key": reader_assets.asset_key("VoiceOfML/Teachers", reader_assets.GBK_PDF_FOLDER + "/合订本.pdf"),
                 "repo": "VoiceOfML/Teachers", "path": reader_assets.GBK_PDF_FOLDER + "/合订本.pdf",
