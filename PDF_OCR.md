@@ -3,6 +3,10 @@
 `Render PDF OCR Inputs` (`pdf-render-inputs.yml`) supplies the durable inputs
 for `Build PDF OCR Assets` (`pdf-ocr-assets.yml`). The latter also runs on render
 workflow completion and can be dispatched independently to drain its backlog.
+`Schedule Large PDF Rendering` checks hourly and dispatches the
+large render workflow from the current `main` only when no render run is pending,
+queued or active. This includes the existing older long-running batches; the
+controller never cancels or replaces them. Manual renders remain available.
 The existing large-PDF WebP worker is not the supplier of OCR images: its
 100 MiB policy and lossy delivery images are unsuitable for that purpose.
 The image OCR concurrency group is `pdf-image-ocr-assets`; legacy monolithic

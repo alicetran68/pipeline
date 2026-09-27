@@ -1,0 +1,26 @@
+name: Schedule Large PDF Rendering
+
+on:
+  schedule:
+    - cron: "13 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-render-inputs-controller
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Dispatch only when no render run is pending or active
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: python3 -B scripts/dispatch_pdf_render.py
