@@ -42,7 +42,7 @@ def shard_for_key(key: str, shard_count: int) -> int:
     return shared.hash_for_key(key, shard_count)
 
 
-def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
+def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", path_prefix="", limit=0,
                   retry_failed=False, force=False, shard_count=1, shard_index=0) -> list[dict]:
     if shard_count < 1 or not 0 <= shard_index < shard_count:
         raise ValueError("invalid reader asset shard")
@@ -65,7 +65,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
-        if exact_path and path != exact_path:
+        if (exact_path and path != exact_path) or (path_prefix and not path.startswith(path_prefix)):
             continue
         key = asset_key(source_repo, path)
         if shard_for_key(key, shard_count) != shard_index:
@@ -164,6 +164,7 @@ def parse_args():
     parser.add_argument("--repo", default="")
     parser.add_argument("--extension", default="")
     parser.add_argument("--path", default="")
+    parser.add_argument("--path-prefix", default="")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -186,7 +187,8 @@ def main() -> int:
         manifest = validate_manifest(load_json(args.manifest))
     else:
         manifest = remote_manifest(HfApi(token=os.environ.get("HF_TOKEN") or None), args.assets_repo)
-    queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
+    queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension,
+                        exact_path=args.path, path_prefix=args.path_prefix,
                         limit=args.limit, retry_failed=args.retry_failed, force=args.force,
                         shard_count=args.shard_count, shard_index=args.shard_index)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +200,7 @@ def main() -> int:
         "stale_keys": sorted(set(manifest.get("files", {})) - set(current_keys)),
         "objects": reusable_objects(manifest),
         "force_rebuild": bool(args.force),
-        "authoritative_snapshot": not bool(args.repo or args.extension or args.path),
+        "authoritative_snapshot": not bool(args.repo or args.extension or args.path or args.path_prefix),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
     return 0

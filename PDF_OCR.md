@@ -86,6 +86,12 @@ do not send those already rendered pages to OCR. Other Lin editions with
 working embedded fonts stay on their existing native PDF path. The explicit
 repair folder allowlist is in `reader_assets.py` and requires a successful
 `gbk-font-repair-v1` asset before a new volume enters this rendering queue.
+To convert a complete listed series, dispatch `Build Reader Assets` with
+`repo=VoiceOfML/Teachers`, `extension=pdf`, and `path_prefix` set to its full
+folder path ending in `/`; first use `dry_run=true`. A scoped queue never
+prunes unrelated Reader mappings. The converted small PDFs are then rendered
+by `vomebook/pipeline`, which triggers the main pipeline's Reader index
+publisher; the main pipeline still owns the PDF book-text publication.
 
 For an **already rendered** book, first inspect the current Reader-Assets
 registry and validate one book without writing remote data:

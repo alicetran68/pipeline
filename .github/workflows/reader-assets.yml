@@ -20,6 +20,11 @@ on:
         required: false
         default: ""
         type: string
+      path_prefix:
+        description: Source folder prefix within the dataset, or blank for all
+        required: false
+        default: ""
+        type: string
       limit:
         description: Files per shard conversion batch
         required: true
@@ -97,6 +102,7 @@ jobs:
           INPUT_REPO: ${{ inputs.repo || '' }}
           INPUT_EXTENSION: ${{ inputs.extension || '' }}
           INPUT_PATH: ${{ inputs.path || '' }}
+          INPUT_PATH_PREFIX: ${{ inputs.path_prefix || '' }}
         run: |
           retry_reader_command() {
             local attempt delay
@@ -116,6 +122,7 @@ jobs:
             --repo "${INPUT_REPO}"
             --extension "${INPUT_EXTENSION}"
             --path "${INPUT_PATH}"
+            --path-prefix "${INPUT_PATH_PREFIX}"
             --limit "${total_limit}"
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi

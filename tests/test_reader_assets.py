@@ -453,6 +453,17 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual([item["path"] for item in queue], ["A/Book.docx"])
 
+    def test_path_prefix_selects_folder_without_matching_siblings(self):
+        records = self.records + [
+            {"Repo": "VoiceOfML/Test", "File": "Nearby", "Extension": "docx", "Folder": ["A"], "Size": 1},
+            {"Repo": "VoiceOfML/Test", "File": "Other", "Extension": "docx", "Folder": ["AB"], "Size": 1},
+        ]
+        queue = scan_reader_assets.build_queue(
+            records, self.revisions, reader_assets.empty_manifest(),
+            repo="VoiceOfML/Test", extension="docx", path_prefix="A/",
+        )
+        self.assertEqual([item["path"] for item in queue], ["A/Book.docx", "A/Nearby.docx"])
+
     def test_missing_assets_repository_is_an_empty_manifest(self):
         api = Mock()
         response = requests.Response()
