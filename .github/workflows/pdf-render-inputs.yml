@@ -35,9 +35,6 @@ on:
         description: Re-probe and rebuild the selected source paths
         default: false
         type: boolean
-  schedule:
-    - cron: "13 * * * *"
-
 permissions:
   contents: read
   actions: read
