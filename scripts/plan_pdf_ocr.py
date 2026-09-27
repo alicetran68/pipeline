@@ -69,7 +69,7 @@ def download_source(item: dict) -> Path:
 
 
 def plan(records: list[dict], workers: int = 4, current: dict | None = None,
-         retry_failed: bool = False, native_text_stream: bool = False) -> dict:
+         retry_failed: bool = False, native_text_stream: bool = False, render_estimator=None) -> dict:
     current_files = (current or {}).get("files", {})
     terminal = {"ready", "failed", "skipped"} if not retry_failed else {"ready", "skipped"}
     records = [item for item in records if not (
@@ -83,12 +83,15 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
             source = download_source(item)
             digest, size = shared.hash_file(source)
             probe = lin_pdf_text.probe(source) if lin_pdf_text.applies(item) else pdf_ocr.probe_pdf(source)
-            return {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
+            inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
                     "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
                     **({"native_extractor": "pymupdf-v1"} if lin_pdf_text.applies(item)
                        and probe["native_page_ratio"] >= .8 else {}),
                     **({"force_image_render": True} if native_text_stream
                        and probe["classification"] == "native-text" else {})}
+            if render_estimator is not None:
+                inspected["_render_cost"] = render_estimator(inspected, source)
+            return inspected
         except Exception as exc:
             return {**item, "status": "failed", "profile": pdf_ocr.asset_profile(),
                     "error": f"{type(exc).__name__}: {exc}"[:1000]}

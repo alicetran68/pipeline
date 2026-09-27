@@ -84,7 +84,7 @@ jobs:
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi
-          python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
+          python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --target-render-seconds 1500 --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7

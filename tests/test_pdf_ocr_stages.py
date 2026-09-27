@@ -286,13 +286,121 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_render_plan_balances_very_large_books_by_page_range(self):
         book = {**self.item(), "source_sha256": "a" * 64, "page_count": 2001,
-                "profile": pdf_ocr.asset_profile()}
+                 "profile": pdf_ocr.asset_profile()}
         queue = stages.plan_render_ranges({"shards": [{"records": [book]}]}, {})
         tasks = [t for shard in queue["shards"] for t in shard["records"]]
         self.assertEqual(len(tasks), 9)
         self.assertEqual(sum(t["end"] - t["start"] + 1 for t in tasks), 2001)
         self.assertGreater(queue["shard_count"], 1)
         self.assertLessEqual(max(s["page_count"] for s in queue["shards"]), 500)
+
+    def test_cost_sampling_uses_three_real_render_paths_without_uploading(self):
+        item = {**self.item(), "source_sha256": "a" * 64, "page_count": 1000}
+        samples = [{"timing": {"page_seconds": value, "setup_seconds": 2}} for value in (1, 20, 3)]
+        with patch.object(stages, "render_book", side_effect=samples) as render, \
+                patch.object(stages, "upload_objects", side_effect=AssertionError("samples stay local")):
+            cost = stages.sample_render_cost(item, self.root / "source.pdf")
+        self.assertEqual(cost, {"seconds_per_page": 20, "setup_seconds": 2, "source": "sample", "samples": 3})
+        self.assertEqual([call.args[0]["start"] for call in render.call_args_list], [1, 500, 1000])
+        self.assertTrue(all(call.args[0]["start"] == call.args[0]["end"] for call in render.call_args_list))
+        prior = {**stages.range_identity({**item, "render_profile": stages.render_profile()}),
+                 "ranges": {"000001-000250": {}}, "range_timings": {
+                     "000001-000250": {"page_count": 250, "page_seconds": 5000, "setup_seconds": 2,
+                                          "image_rendered": True}}}
+        with patch.object(stages, "render_book", side_effect=AssertionError("history skips samples")):
+            self.assertEqual(stages.estimate_render_cost(item, self.root / "missing", {item["key"]: prior})["source"], "history")
+        with patch.object(stages, "render_book", side_effect=ValueError("invalid page")):
+            fallback = stages.sample_render_cost(item, self.root / "source.pdf")
+        self.assertEqual(fallback["source"], "fallback")
+
+    def test_sample_timeout_terminates_owned_process_group_and_keeps_completed_measurements(self):
+        item = {**self.item(), "source_sha256": "a" * 64, "page_count": 1000}
+        process = Mock(pid=12345)
+        def wait(timeout=None):
+            if timeout is not None:
+                raise stages.subprocess.TimeoutExpired("sample", timeout)
+            return 0
+        process.wait.side_effect = wait
+        def start(command, **kwargs):
+            self.assertTrue(kwargs["start_new_session"])
+            output = Path(command[command.index("--output") + 1])
+            pdf_ocr.write_json(output / "render-cost.json", {
+                "seconds_per_page": 25, "setup_seconds": 3, "source": "sample", "samples": 1})
+            owner = Mock()
+            owner.__enter__ = Mock(return_value=process)
+            owner.__exit__ = Mock(return_value=False)
+            return owner
+        with patch.object(stages.subprocess, "Popen", side_effect=start), patch.object(stages.os, "killpg") as kill:
+            cost = stages.estimate_render_cost(item, self.root / "source.pdf", {})
+        self.assertEqual(cost["seconds_per_page"], 25)
+        kill.assert_called_once_with(12345, stages.signal.SIGKILL)
+
+    def test_time_plan_resumes_old_ranges_and_assembles_mixed_sizes(self):
+        source = self.root / "source.pdf"
+        source.write_bytes(b"pdf")
+        item = {**self.item(), "source_sha256": hashlib.sha256(b"pdf").hexdigest(), "page_count": 5,
+                "probe": {"page_count": 5, "page_chars": [0] * 5, "classification": "scan"},
+                "_render_cost": {"seconds_per_page": 20, "setup_seconds": 0},
+                "render_profile": stages.render_profile(), "profile": pdf_ocr.asset_profile()}
+        def render(_source, page, directory, reader_pixels=None, **kwargs):
+            path = directory / f"page-{page:06d}.png"
+            with Image.new("RGB", (20, 30), "white") as image:
+                image.save(path)
+                image.save(path.with_suffix(".webp"))
+            return path, 20, 30
+        with patch.object(pdf_ocr, "render_page", side_effect=render), patch.object(pdf_ocr, "JXL_ENABLED", False):
+            old = stages.render_book({**item, "start": 1, "end": 2}, source, self.root / "old")
+            self.store(self.root / "old")
+            progress = {item["key"]: {**stages.range_identity(item), "ranges": {"000001-000002": old["descriptor"]}}}
+            with patch.object(stages, "read_object", side_effect=self.read):
+                planned = stages.plan_render_ranges({"shards": [{"records": [item]}]}, progress, target_seconds=40)
+            tasks = stages.expand_render_tasks(planned, [t for shard in planned["shards"] for t in shard["records"]])
+            self.assertEqual(sorted((t["start"], t["end"]) for t in tasks), [(3, 3), (4, 4), (5, 5)])
+            self.assertTrue(all("probe" not in compact for shard in planned["shards"]
+                                for compact in shard["records"]))
+            tampered = {**planned["shards"][0]["records"][0], "source_sha256": "f" * 64}
+            with self.assertRaisesRegex(ValueError, "identity differs"):
+                stages.expand_render_tasks(planned, [tampered])
+            descriptors = dict(progress[item["key"]]["ranges"])
+            for task in tasks:
+                bundle = self.root / str(task["start"])
+                result = stages.render_book(task, source, bundle)
+                self.store(bundle)
+                descriptors[stages.range_id(task["start"], task["end"])] = result["descriptor"]
+                self.assertGreater(result["timing"]["page_seconds"], 0)
+                self.assertNotIn("timing", json.loads(self.read(result["descriptor"])))
+            with patch.object(stages, "read_object", side_effect=self.read):
+                complete = stages.assemble_render_book(item, descriptors, self.root / "complete")
+            self.store(self.root / "complete")
+            self.assertEqual([p["p"] for p in json.loads(self.read(complete["render_manifest"]))["pages"]], list(range(1, 6)))
+            overlap = stages.render_book({**item, "start": 2, "end": 3}, source, self.root / "overlap")
+            self.store(self.root / "overlap")
+            descriptors["000002-000003"] = overlap["descriptor"]
+            with patch.object(stages, "read_object", side_effect=self.read):
+                self.assertIsNotNone(stages.assemble_render_book(item, descriptors, self.root / "consistent-overlap"))
+            body = json.loads(self.read(overlap["descriptor"]))
+            body["pages"][0]["text"] = "conflicting page metadata"
+            raw = json.dumps(body).encode()
+            self.objects[overlap["descriptor"]["path"]] = raw
+            descriptors["000002-000003"] = {**overlap["descriptor"], "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            with patch.object(stages, "read_object", side_effect=self.read):
+                with self.assertRaisesRegex(ValueError, "conflicting overlapping"):
+                    stages.assemble_render_book(item, descriptors, self.root / "conflict")
+
+    def test_timing_merge_keeps_old_ranges_and_invalidates_changed_sources(self):
+        book = {**self.item(), "source_sha256": "a" * 64, "page_count": 500,
+                "render_profile": stages.render_profile()}
+        identity = stages.range_identity(book)
+        first = {**identity, "ranges": {"000001-000250": {}}, "range_timings": {
+            "000001-000250": {"page_count": 250, "page_seconds": 500, "setup_seconds": 10}}}
+        second = {**identity, "ranges": {"000251-000500": {}}, "range_timings": {
+            "000251-000500": {"page_count": 250, "page_seconds": 5000, "setup_seconds": 10}}}
+        merged = stages.merge_render_ranges(first, second)
+        self.assertEqual(len(merged["ranges"]), 2)
+        self.assertEqual(len(merged["range_timings"]), 2)
+        changed = stages.merge_render_ranges(first, {**second, "source_sha256": "b" * 64})
+        self.assertEqual(set(changed["ranges"]), {"000251-000500"})
+        self.assertEqual(set(changed["range_timings"]), {"000251-000500"})
 
     def test_render_publication_saves_partial_progress_then_only_complete_book(self):
         previous = self.render_fixture()
@@ -331,11 +439,15 @@ class PdfOcrStagesTests(unittest.TestCase):
                 results_dir.mkdir()
                 pdf_ocr.write_json(results_dir / f"results-{selected}.json", {"version": 1, "results": [{
                     **stages.range_identity(book), "start": selected, "end": selected,
-                    "status": "range", "descriptor": descriptors[selected]}]})
+                    "status": "range", "descriptor": descriptors[selected], "timing": {
+                        "page_count": 1, "image_rendered": True,
+                        "page_seconds": 4.0, "setup_seconds": 1.0}}]})
                 with patch.object(sys, "argv", ["pdf_ocr_stages.py", "publish-render", "--queue", str(location),
                                                 "--results-dir", str(results_dir), "--output", str(self.root)]):
                     stages.main()
                 state = updates[-1][1][book["key"]]
+                progress_update = updates[-2][1][book["key"]]
+                self.assertEqual(progress_update["range_timings"][stages.range_id(selected, selected)]["page_seconds"], 4.0)
                 if selected == 1:
                     self.assertEqual(state["status"], "failed")
                     self.assertNotIn("page_manifest", state)

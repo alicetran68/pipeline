@@ -8,10 +8,28 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from scripts import pdf_ocr, pdf_ocr_stages as stages
+from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
 
 
 class RealPdfRenderingTests(unittest.TestCase):
+    def test_time_estimator_samples_real_pages_locally_and_builds_a_compact_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "sample.pdf"
+            with Image.new("RGB", (100, 150), "white") as image:
+                image.save(source, "PDF", resolution=100, save_all=True, append_images=[image, image])
+            record = {"key": "test\0sample.pdf", "source_revision": "test", "source_kind": "upstream"}
+            with patch.object(plan_pdf_ocr, "download_source", return_value=source):
+                queue = plan_pdf_ocr.plan([record], workers=1,
+                    render_estimator=lambda item, path: stages.estimate_render_cost(item, path, {}))
+            self.assertEqual(queue["failed"], [])
+            cost = queue["shards"][0]["records"][0]["_render_cost"]
+            self.assertEqual((cost["source"], cost["samples"]), ("sample", 3))
+            self.assertGreater(cost["seconds_per_page"], 0)
+            timed = stages.plan_render_ranges(queue, {}, target_seconds=1500)
+            tasks = [task for shard in timed["shards"] for task in shard["records"]]
+            self.assertNotIn("probe", tasks[0])
+            self.assertEqual(stages.expand_render_tasks(timed, tasks)[0]["probe"]["page_count"], 3)
+
     def test_small_scanned_pdf_renders_lossless_ocr_input_before_recognition(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

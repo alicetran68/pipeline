@@ -14,6 +14,9 @@ import json
 import math
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 import time
 from contextlib import nullcontext
@@ -26,10 +29,10 @@ from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
-    from . import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
+    from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     from .run_pdf_ocr import source_path, _bucket_retry_delay
 except ImportError:
-    import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
+    import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     from run_pdf_ocr import source_path, _bucket_retry_delay
 
 RENDER_REGISTRY = "pdf_render_manifest.json"
@@ -39,6 +42,7 @@ RENDER_RANGE_PAGES = 250
 RENDER_RANGE_THRESHOLD = 500
 BUCKET = "hf://buckets/vomebook/pdf-pages"
 SMALL_RENDER_MAX_SOURCE_BYTES = 100 * 1024 * 1024
+RENDER_SAMPLE_TIMEOUT = 60
 
 
 def render_profile() -> str:
@@ -258,7 +262,66 @@ def validate_range(book, start, end, descriptor):
     return pages
 
 
-def plan_render_ranges(queue, progress, force_reprobe=False):
+def estimate_render_cost(item, source, progress):
+    book = {**item, "render_profile": render_profile()}
+    previous = progress.get(book["key"], {})
+    image_rendered = bool(book.get("force_image_render") or book.get("probe", {}).get("classification") != "native-text")
+    cost = pdf_render_schedule.history_cost(range_identity(book), previous, image_rendered)
+    if cost is not None:
+        return cost
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        queue = root / "book.json"
+        output = root / "cost"
+        pdf_ocr.write_json(queue, book)
+        command = [sys.executable, str(Path(__file__).resolve()), "measure-render", "--queue", str(queue),
+                   "--source", str(source.resolve()), "--output", str(output)]
+        with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True) as process:
+            try:
+                process.wait(timeout=RENDER_SAMPLE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # Terminate Poppler children too; sampling never owns a production worker.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        result = output / "render-cost.json"
+        if result.is_file():
+            return json.loads(result.read_text(encoding="utf-8"))
+    return {"seconds_per_page": pdf_render_schedule.DEFAULT_PAGE_SECONDS,
+            "setup_seconds": 0, "source": "fallback", "samples": 0}
+
+
+def sample_render_cost(book, source, output=None):
+    count = book["page_count"]
+    samples = []
+    for number in sorted({1, (count + 1) // 2, count}):
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                result = render_book({**book, "start": number, "end": number}, source, Path(temp))
+                timing = result["timing"]
+                if (pdf_render_schedule.finite_seconds(timing.get("page_seconds"), positive=True) is not None
+                        and pdf_render_schedule.finite_seconds(timing.get("setup_seconds")) is not None):
+                    samples.append(timing)
+        except Exception as exc:
+            print(f"render timing sample unavailable: {type(exc).__name__}", flush=True)
+        cost = ({"seconds_per_page": max(s["page_seconds"] for s in samples),
+                 "setup_seconds": max(s["setup_seconds"] for s in samples),
+                 "source": "sample", "samples": len(samples)} if samples else {
+                     "seconds_per_page": pdf_render_schedule.DEFAULT_PAGE_SECONDS,
+                     "setup_seconds": 0, "source": "fallback", "samples": 0})
+        if output is not None:
+            pending = output / "render-cost.pending.json"
+            pdf_ocr.write_json(pending, cost)
+            os.replace(pending, output / "render-cost.json")
+    return cost
+
+
+def plan_render_ranges(queue, progress, force_reprobe=False, target_seconds=None):
+    if target_seconds is not None and pdf_render_schedule.finite_seconds(target_seconds, positive=True) is None:
+        raise ValueError("render target seconds must be finite and positive")
     books = [{**item, "render_profile": render_profile()}
              for shard in queue["shards"] for item in shard["records"]]
     tasks, saved = [], {}
@@ -266,27 +329,55 @@ def plan_render_ranges(queue, progress, force_reprobe=False):
         prior = progress.get(book["key"], {})
         existing = (prior.get("ranges", {}) if not force_reprobe
                     and all(prior.get(k) == v for k, v in range_identity(book).items()) else {})
-        for start, end in render_ranges(book):
-            key = range_id(start, end)
-            descriptor = existing.get(key)
-            if descriptor:
-                try:
-                    validate_range(book, start, end, descriptor)
-                    saved.setdefault(book["key"], {})[key] = descriptor
-                    continue
-                except (ValueError, KeyError, TypeError, OSError, json.JSONDecodeError):
-                    pass
+        completed = []
+        for key, descriptor in existing.items():
+            bounds = pdf_render_schedule.parse_range(key, book["page_count"])
+            if bounds is None:
+                continue
+            start, end = bounds
+            try:
+                validate_range(book, start, end, descriptor)
+                saved.setdefault(book["key"], {})[key] = descriptor
+                completed.append(bounds)
+            except (ValueError, KeyError, TypeError, OSError, json.JSONDecodeError):
+                pass
+        size = RENDER_RANGE_PAGES if book["page_count"] > RENDER_RANGE_THRESHOLD else book["page_count"]
+        if target_seconds is not None:
+            size = pdf_render_schedule.range_size(book.get("_render_cost", {}), target_seconds, size)
+        for start, end in pdf_render_schedule.missing_ranges(book["page_count"], completed, size):
             tasks.append({**book, "start": start, "end": end})
-    count = min(256, len(tasks), max(1, math.ceil(sum(t["end"] - t["start"] + 1 for t in tasks) / 500)))
-    shards = shared.weighted_shards(tasks, count, weight=lambda t: t["end"] - t["start"] + 1,
-                                    order=lambda t: (-(t["end"] - t["start"] + 1), t["key"], t["start"])) if tasks else []
+    if target_seconds is None:
+        count = min(256, len(tasks), max(1, math.ceil(sum(t["end"] - t["start"] + 1 for t in tasks) / 500)))
+        shards = shared.weighted_shards(tasks, count, weight=lambda t: t["end"] - t["start"] + 1,
+                                        order=lambda t: (-(t["end"] - t["start"] + 1), t["key"], t["start"])) if tasks else []
+    else:
+        shards = pdf_render_schedule.balance(tasks, target_seconds)
     return {**queue, "books": books, "saved_ranges": saved,
+            **({"target_render_seconds": target_seconds} if target_seconds is not None else {}),
             "shard_count": len(shards), "shard_ids": list(range(len(shards))),
             "shards": [{"index": i, "page_count": sum(t["end"] - t["start"] + 1 for t in shard),
-                        "records": shard} for i, shard in enumerate(shards)]}
+                        **({"estimated_seconds": round(sum(map(pdf_render_schedule.task_seconds, shard)), 2)}
+                           if target_seconds is not None else {}),
+                        "records": ([{key: task[key] for key in (*range_identity(task), "start", "end")}
+                                     | {"_render_cost": task.get("_render_cost", {})} for task in shard]
+                                    if target_seconds is not None else shard)} for i, shard in enumerate(shards)]}
+
+
+def expand_render_tasks(queue, records):
+    books = {book["key"]: book for book in queue.get("books", [])}
+    tasks = []
+    for record in records:
+        book = books.get(record["key"])
+        if book is None:
+            raise ValueError("render task refers to an unknown book")
+        if any(record.get(key) != value for key, value in range_identity(book).items()):
+            raise ValueError("render task identity differs from book")
+        tasks.append({**book, **record})
+    return tasks
 
 
 def render_book(item: dict, source: Path, bundle: Path) -> dict:
+    started = time.perf_counter()
     source_sha, source_bytes = shared.hash_file(source)
     if item.get("source_sha256") and item["source_sha256"] != source_sha:
         raise ValueError("PDF source changed after planning")
@@ -305,6 +396,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     scan_images = (pdf_ocr.scan_reader_images(source, first, last)
                    if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
+    page_started = time.perf_counter()
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
             lin_pdf_text.open_pdf(source) if lin_native else nullcontext(None)) as document:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
@@ -351,6 +443,9 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                              "text_spans": payload["text_spans"], "layout": payload["layout"]})
             pages.append(page)
             print(f"rendered {number}/{probe['page_count']}: {item['key']}", flush=True)
+    timing = {"page_count": len(pages), "image_rendered": any("w" in page for page in pages),
+              "page_seconds": time.perf_counter() - page_started,
+              "setup_seconds": page_started - started}
     if "start" in item:
         start, end = item["start"], item["end"]
         if not 1 <= start <= end <= probe["page_count"] or len(pages) != end - start + 1:
@@ -360,6 +455,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                                         "image_rendered": any("w" in page for page in pages),
                                         "start": start, "end": end, "pages": pages})
         return {**range_identity(base), "status": "range", "start": start, "end": end,
+                "timing": timing,
                 "descriptor": metadata(descriptor, bundle)}
     image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
     page_manifest_meta = None
@@ -419,16 +515,30 @@ def merge_render_ranges(old, new):
     ranges = dict(old.get("ranges", {})) if isinstance(old, dict) and all(
         old.get(key) == value for key, value in identity.items()) else {}
     ranges.update(new["ranges"])
-    return {**identity, "ranges": ranges}
+    timings = dict(old.get("range_timings", {})) if isinstance(old, dict) and all(
+        old.get(key) == value for key, value in identity.items()) and isinstance(old.get("range_timings", {}), dict) else {}
+    timings.update(new.get("range_timings", {}))
+    return {**identity, "ranges": ranges, **({"range_timings": timings} if timings else {})}
 
 
 def assemble_render_book(book, descriptors, bundle):
     pages = []
-    for start, end in render_ranges(book):
-        descriptor = descriptors.get(range_id(start, end))
-        if not descriptor:
+    ranges = []
+    for key, descriptor in descriptors.items():
+        bounds = pdf_render_schedule.parse_range(key, book["page_count"])
+        if bounds is None:
+            raise ValueError("invalid render range key")
+        ranges.append((*bounds, descriptor))
+    for start, end, descriptor in sorted(ranges, key=lambda item: (item[0], item[1])):
+        if start > len(pages) + 1:
             return None
-        pages.extend(validate_range(book, start, end, descriptor))
+        incoming = validate_range(book, start, end, descriptor)
+        overlap = min(len(incoming), max(0, len(pages) - start + 1))
+        if pages[start - 1:start - 1 + overlap] != incoming[:overlap]:
+            raise ValueError("conflicting overlapping render pages")
+        pages.extend(incoming[overlap:])
+    if len(pages) != book["page_count"]:
+        return None
     root = root_for(book["source_sha256"], book["key"], book["render_profile"])
     image_pages = [{"page": p["p"], **page_meta(p, "w")} for p in pages if "w" in p]
     page_manifest_meta = None
@@ -761,8 +871,9 @@ def publish_legacy_render(queue, results, api, repo):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("plan-render", "render", "publish-render", "plan-ocr", "ocr", "publish-ocr"))
+    parser.add_argument("stage", choices=("plan-render", "measure-render", "render", "publish-render", "plan-ocr", "ocr", "publish-ocr"))
     parser.add_argument("--queue", type=Path, default=Path("output/pdf-ocr/queue.json"))
+    parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/pdf-ocr/bundle"))
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--limit", type=int, default=20)
@@ -770,6 +881,7 @@ def main():
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--partition", choices=("all", "small", "large"), default="all")
     parser.add_argument("--native-text-stream", action="store_true")
+    parser.add_argument("--target-render-seconds", type=int)
     parser.add_argument("--retry-failed-only", action="store_true")
     parser.add_argument("--results", type=Path, nargs="*", default=[])
     parser.add_argument("--results-dir", type=Path)
@@ -781,6 +893,13 @@ def main():
     parser.add_argument("--source-path-prefix", default="")
     parser.add_argument("--force-reprobe", action="store_true")
     args = parser.parse_args()
+    if args.target_render_seconds is not None and (args.target_render_seconds < 1 or args.stage != "plan-render"):
+        parser.error("--target-render-seconds requires plan-render and a positive value")
+    if args.stage == "measure-render":
+        if args.source is None:
+            parser.error("measure-render requires --source")
+        sample_render_cost(json.loads(args.queue.read_text(encoding="utf-8")), args.source, args.output)
+        return 0
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     repo = args.assets_repo
     args.output.mkdir(parents=True, exist_ok=True)
@@ -800,10 +919,14 @@ def main():
             records = pending_render(records, rendered, current, args.retry_failed, args.partition,
                                      force_reprobe=args.force_reprobe)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
-            queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream)
-            queue["kind"] = "pdf-render-queue"
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
-            queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe)
+            estimator = (lambda item, source: estimate_render_cost(item, source, render_progress)) \
+                if args.target_render_seconds is not None else None
+            queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream,
+                                      render_estimator=estimator)
+            queue["kind"] = "pdf-render-queue"
+            queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe,
+                                       target_seconds=args.target_render_seconds)
         else:
             progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
             if args.source_repo:
@@ -828,10 +951,11 @@ def main():
                 raise ValueError("planned workers but no result artifacts found; refusing empty publication")
             publish_legacy_render(queue, results, api, repo)
             return 0
-        planned = {(item["key"], item["start"], item["end"]): item
-                   for shard in queue["shards"] for item in shard["records"]}
+        planned = {(item["key"], item["start"], item["end"]): item for item in expand_render_tasks(
+            queue, [item for shard in queue["shards"] for item in shard["records"]])}
         books = {item["key"]: item for item in queue["books"]}
         completed_ranges = {key: dict(value) for key, value in queue.get("saved_ranges", {}).items()}
+        range_timings = {}
         for result in results:
             item = planned.get((result["key"], result.get("start"), result.get("end")))
             if not item or any(result.get(field) != value for field, value in range_identity(item).items()):
@@ -844,8 +968,16 @@ def main():
                 if key in saved and saved[key] != result["descriptor"]:
                     raise ValueError("conflicting render range results")
                 saved[key] = result["descriptor"]
+                timing = result.get("timing", {})
+                if (isinstance(timing, dict) and timing.get("page_count") == end - start + 1
+                        and pdf_render_schedule.finite_seconds(timing.get("page_seconds"), positive=True) is not None
+                        and pdf_render_schedule.finite_seconds(timing.get("setup_seconds")) is not None):
+                    range_timings.setdefault(item["key"], {})[key] = timing
         updates = [{**range_identity(book), "ranges": completed_ranges[key]}
                    for key, book in books.items() if key in completed_ranges]
+        for update in updates:
+            if update["key"] in range_timings:
+                update["range_timings"] = range_timings[update["key"]]
         if updates:
             save_registry(api, repo, RENDER_PROGRESS_REGISTRY, {r["key"]: r for r in updates},
                           merge=merge_render_ranges)
@@ -897,7 +1029,7 @@ def main():
         raise ValueError("invalid shard")
     tasks = queue["shards"][args.shard]
     if args.stage == "render":
-        tasks = tasks["records"]
+        tasks = expand_render_tasks(queue, tasks["records"]) if "books" in queue else tasks["records"]
     else:
         # Same worker/model, small durable checkpoints. A timeout near page 500
         # must not discard all of that worker's completed recognition.

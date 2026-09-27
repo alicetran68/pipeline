@@ -55,7 +55,7 @@ the shared `reader-assets` publication lock.
   `recover_run` republishes validated artifacts from a completed main-branch
   render run without recomputing or reuploading its PNG images.
 - Books over 500 pages are scheduled in 250-page ranges; smaller books remain
-  single tasks. Ten render workers may run concurrently. Each range uploads
+  single tasks. Eighteen render workers may run concurrently. Each range uploads
   its immutable pages and checksummed range descriptor before the worker writes
   its result artifact. `pdf_render_progress.json` tracks completed ranges by
   source SHA, profile and book identity. Later batches validate and reuse those
@@ -76,6 +76,34 @@ the shared `reader-assets` publication lock.
   Reader display. The known GBK 林一章版 files are processed only from their
   `gbk-font-repair-v1` Reader PDFs; the original malformed-font PDFs are not
   indexed if a repair asset is unavailable.
+
+### Large-PDF time balancing
+
+The large render workflow uses `--target-render-seconds 1500` as a soft
+25-minute shard target. It estimates page processing from matching source and
+render-profile timings in `pdf_render_progress.json`. Without usable history,
+planning renders the first, middle and last page locally through the normal
+render path, takes the slowest sampled page, and uploads no sample objects.
+Sampling owns an isolated process group with a 60-second book deadline; completed
+measurements survive a timeout and its Poppler children are terminated together.
+Unavailable samples use a three-second/page fallback. Small-PDF and OCR queues
+retain their own schedulers.
+
+Slow books get smaller page ranges, at most 250 pages, with about half the shard
+target reserved per range. Longest estimated ranges enter the least-loaded
+shard first. Queues expose per-shard `estimated_seconds`; the GitHub 256-shard
+matrix cap can make the target unattainable for a very large batch. Estimates
+do not impose page deadlines or skip pages, and sampling cannot guarantee
+uniform cost across a heterogeneous book. Time-weighted task records reference
+the queue's book metadata rather than repeating the entire PDF probe in every
+small range. Workers and publishers validate the reference's source identity.
+
+Successful workers attach page-processing and setup timings to result artifacts.
+Publication saves these separately from checksummed range descriptors, so timing
+does not change immutable image/manifest bytes or the render profile. Old ranges
+remain reusable when source/profile match, even after range sizes change. Only
+missing gaps are scheduled. Assembly accepts mixed range sizes, verifies every
+page, rejects conflicting overlaps and publishes only a complete book.
 
 ### Lin Yizhang text recovery
 
