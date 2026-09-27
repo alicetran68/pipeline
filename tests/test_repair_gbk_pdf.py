@@ -159,6 +159,18 @@ class GbkPdfRepairTests(unittest.TestCase):
                 repair_gbk_pdf.repair_pdf(source, target)
             self.assertFalse(target.exists())
 
+    def test_empty_password_encrypted_fixture_is_repaired(self):
+        with tempfile.TemporaryDirectory() as root:
+            source, target = Path(root) / "source.pdf", Path(root) / "target.pdf"
+            source.write_bytes(fixture())
+            writer = PdfWriter(clone_from=PdfReader(source))
+            writer.encrypt("")
+            with source.open("wb") as handle:
+                writer.write(handle)
+            result = repair_gbk_pdf.repair_pdf(source, target)
+            self.assertEqual(result["fonts_repaired"], 1)
+            self.assertFalse(PdfReader(target).is_encrypted)
+
 
 if __name__ == "__main__":
     unittest.main()

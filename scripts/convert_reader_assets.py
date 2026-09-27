@@ -1403,7 +1403,14 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                 from .repair_gbk_pdf import repair_pdf
             except ImportError:
                 from repair_gbk_pdf import repair_pdf
-            repair_pdf(source, target)
+            try:
+                repair_pdf(source, target)
+            except ValueError as exc:
+                if "does not contain the expected malformed GBK fonts" not in str(exc):
+                    raise
+                # The allowlist covers families with mixed supplements and
+                # indexes. A valid Type0/Identity-H PDF needs no rewrite.
+                shutil.copyfile(source, target)
             return
         if not password:
             raise RuntimeError("protected PDF has no known password")
