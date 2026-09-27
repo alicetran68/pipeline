@@ -1,0 +1,29 @@
+name: Publish Reader Index
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: reader-assets
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Publish current Reader sidecar to Pages
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py
