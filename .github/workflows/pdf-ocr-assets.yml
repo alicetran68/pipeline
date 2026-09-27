@@ -92,7 +92,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements-pdf-ocr.txt
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .cache/paddlex
           key: paddlex-${{ inputs.lang || 'auto' }}-${{ inputs.backend || 'rapidocr_onnxruntime' }}-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}
