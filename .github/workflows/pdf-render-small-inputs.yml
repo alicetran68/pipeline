@@ -23,6 +23,10 @@ on:
         description: Source path prefix filter, or blank for all
         default: ""
         type: string
+      force_reprobe:
+        description: Re-probe and rebuild the selected source paths
+        default: false
+        type: boolean
   schedule:
     - cron: "*/15 * * * *"
 
@@ -51,7 +55,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
       - name: Fetch source metadata
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -65,10 +69,12 @@ jobs:
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
           SOURCE_REPO: ${{ inputs.source_repo || '' }}
           SOURCE_PATH_PREFIX: ${{ inputs.source_path_prefix || '' }}
+          FORCE_REPROBE: ${{ inputs.force_reprobe || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
+          if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi
           python scripts/pdf_ocr_stages.py plan-render --partition small --native-text-stream --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint 0 "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
@@ -96,7 +102,7 @@ jobs:
       - run: pip install -r scripts/requirements.txt
       - name: Install rendering tools
         run: |
-          packages=(poppler-utils)
+          packages=(poppler-utils fonts-noto-cjk)
           if [[ "$PDF_JXL_ENABLED" == true ]]; then packages+=(libjxl-tools); fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "${packages[@]}"

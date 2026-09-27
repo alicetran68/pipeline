@@ -31,6 +31,10 @@ on:
         description: Source path prefix filter, or blank for all
         default: ""
         type: string
+      force_reprobe:
+        description: Re-probe and rebuild the selected source paths
+        default: false
+        type: boolean
   schedule:
     - cron: "13 * * * *"
 
@@ -59,7 +63,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
       - name: Fetch source metadata
         if: inputs.recover_run == ''
         env:
@@ -76,12 +80,14 @@ jobs:
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
           SOURCE_REPO: ${{ inputs.source_repo || '' }}
           SOURCE_PATH_PREFIX: ${{ inputs.source_path_prefix || '' }}
+          FORCE_REPROBE: ${{ inputs.force_reprobe || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINT" =~ ^[0-9]+$ ]] || exit 1
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
-            python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
+          if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi
+          python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7

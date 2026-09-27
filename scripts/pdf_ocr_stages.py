@@ -194,10 +194,13 @@ def render_partition_matches(item, partition):
     return is_small if partition == "small" else not is_small
 
 
-def pending_render(records, rendered, ocr, retry_failed=False, partition="all"):
+def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False):
     pending = []
     for item in records:
         if not render_partition_matches(item, partition):
+            continue
+        if force_reprobe:
+            pending.append(item)
             continue
         previous = rendered.get(item["key"])
         if same_source(previous, item) and previous.get("render_profile") == render_profile():
@@ -756,6 +759,7 @@ def main():
     parser.add_argument("--assets-repo", default="vomebook/Reader-Assets")
     parser.add_argument("--source-repo", default="")
     parser.add_argument("--source-path-prefix", default="")
+    parser.add_argument("--force-reprobe", action="store_true")
     args = parser.parse_args()
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     repo = args.assets_repo
@@ -773,7 +777,8 @@ def main():
             if args.source_path_prefix:
                 records = [item for item in records
                            if str(item.get("path", "")).startswith(args.source_path_prefix)]
-            records = pending_render(records, rendered, current, args.retry_failed, args.partition)
+            records = pending_render(records, rendered, current, args.retry_failed, args.partition,
+                                     force_reprobe=args.force_reprobe)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream)
             queue["kind"] = "pdf-render-queue"
