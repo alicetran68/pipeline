@@ -430,6 +430,12 @@ class PdfOcrStagesTests(unittest.TestCase):
             queue = plan_pdf_ocr.plan([item], workers=1, native_text_stream=True)
         self.assertTrue(queue["shards"][0]["records"][0]["force_image_render"])
 
+    def test_gbk_repaired_generated_pdf_is_not_misclassified_as_ocr_input(self):
+        entry = {"source_kind": "generated",
+                 "reader_assets_path": "objects/aa/" + "a" * 64 + "/gbk-font-repair-v1/document.pdf"}
+        self.assertTrue(stages.skip_ocr_for_generated_text_pdf(entry))
+        self.assertFalse(stages.skip_ocr_for_generated_text_pdf({"source_kind": "upstream"}))
+
     def test_failed_books_do_not_starve_untouched_backlog(self):
         failed = {**self.item(), "key": "repo\0a.pdf", "path": "a.pdf"}
         untouched = {**self.item(), "key": "repo\0z.pdf", "path": "z.pdf"}

@@ -457,6 +457,18 @@ def recognition_identity(entry, options):
     return f"{base}-layout-{ocr_layout.VERSION}-{digest}"
 
 
+def skip_ocr_for_generated_text_pdf(entry: dict) -> bool:
+    """Do not OCR repaired PDFs merely because a runner cannot decode them.
+
+    The GBK-repaired source has a usable text layer on supported Poppler/PDF
+    environments. Its page stream is still useful for fast Reader startup,
+    but treating a runner-specific empty extraction as a scan would OCR every
+    page and replace the source text with recognition output.
+    """
+    return (entry.get("source_kind") == "generated"
+            and "/gbk-font-repair-v1/" in str(entry.get("reader_assets_path", "")))
+
+
 def generation_for(book):
     return hashlib.sha256((book["render_manifest"]["sha256"] + book["profile"]).encode()).hexdigest()
 
@@ -523,6 +535,8 @@ def plan_images(rendered, current, progress, limit=20, target=500, overrides=Non
         if retry_failed_only and current.get(key, {}).get("status") != "failed":
             continue
         if entry.get("status") not in {"ready", "skipped"}:
+            continue
+        if skip_ocr_for_generated_text_pdf(entry):
             continue
         options = layout_options(overrides or {}, key)
         manifest = None
