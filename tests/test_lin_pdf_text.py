@@ -9,7 +9,7 @@ import pymupdf
 from PIL import Image
 
 from scripts import lin_pdf_text, pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
-from scripts import publish_lin_native_text, reader_assets, repair_gbk_pdf
+from scripts import publish_lin_native_text, publish_pdf_ocr_assets, reader_assets, repair_gbk_pdf
 from tests.test_repair_gbk_pdf import fixture
 
 
@@ -115,6 +115,9 @@ class LinPdfTextTests(unittest.TestCase):
                 self.assertEqual(stages.plan_images({old["key"]: old}, {}, {})["books"], [])
             recovered = publish_lin_native_text.build(old, old_manifest, repaired, root / "backfill")
             self.assertEqual(recovered["status"], "ready")
+            self.assertEqual(recovered["classification"], "native-text")
+            self.assertFalse(publish_pdf_ocr_assets.published({"files": {old["key"]: {
+                **recovered, "classification": "scan"}}}, [recovered]))
             self.assertEqual(recovered["page_manifest"], old["page_manifest"])
             ocr_manifest = json.loads((root / "backfill" / recovered["ocr_manifest"]).read_text())
             self.assertEqual([page["source"] for page in ocr_manifest["pages"]], ["native", "native"])

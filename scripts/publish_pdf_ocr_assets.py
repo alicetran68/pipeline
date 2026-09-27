@@ -79,6 +79,7 @@ def published(current: dict, results: list[dict]) -> bool:
         if result.get("status") == "ready":
             if (entry.get("status") != "ready" or entry.get("profile") != result.get("profile")
                     or entry.get("source_sha256") != result.get("source_sha256")
+                    or entry.get("classification") != result.get("classification")
                     or entry.get("ocr_manifest") != result.get("ocr_manifest")
                     or entry.get("page_manifest") != result.get("page_manifest")):
                 return False

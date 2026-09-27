@@ -75,7 +75,7 @@ def build(entry: dict, manifest: dict, source: Path, bundle: Path) -> dict:
                                        "pages": pages, "book_text": stages.metadata(book_path, bundle),
                                        "page_manifest": entry["page_manifest"]})
     meta = stages.metadata(manifest_path, bundle)
-    return {**stages.public_item(entry), "status": "ready", "profile": profile,
+    return {**stages.public_item(entry), "status": "ready", "classification": "native-text", "profile": profile,
             "language": language, "ocr_version": "native-mupdf-1.28.2", "backend": "native",
             "stream": True, "ocr_manifest": meta["path"], "ocr_manifest_sha256": meta["sha256"],
             "ocr_manifest_bytes": meta["bytes"]}
@@ -96,6 +96,7 @@ def main() -> None:
         raise ValueError("no rendered Lin Yizhang PDF for this path")
     previous = stages.load_registry(api, args.assets_repo, publication.OCR_MANIFEST_NAME, revision)["files"].get(key, {})
     if (previous.get("status") == "ready" and previous.get("ocr_version") == "native-mupdf-1.28.2"
+            and previous.get("classification") == "native-text"
             and stages.same_source(previous, entry) and previous.get("page_manifest") == entry.get("page_manifest")):
         print("current complete text layer already published")
         return
