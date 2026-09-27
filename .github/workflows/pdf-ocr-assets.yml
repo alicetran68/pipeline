@@ -31,10 +31,6 @@ on:
         description: Source path prefix filter, or blank for all
         default: ""
         type: string
-  workflow_run:
-    workflows: [Render PDF OCR Inputs]
-    types: [completed]
-
 permissions:
   contents: read
 
@@ -45,7 +41,6 @@ concurrency:
 
 jobs:
   plan:
-    if: github.event_name != 'workflow_run' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
