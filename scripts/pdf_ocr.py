@@ -265,8 +265,13 @@ def native_page(path: Path, page: int) -> dict:
 
 
 def page_text_probe(path: Path, page: int) -> int:
-    raw = _run(["pdftotext", "-f", str(page), "-l", str(page), "-enc", "UTF-8", str(path), "-"])
-    return len(re.sub(r"\s+", "", clean_text(raw)))
+    for mode in ([], ["-raw"], ["-layout"]):
+        raw = _run(["pdftotext", *mode, "-f", str(page), "-l", str(page),
+                    "-enc", "UTF-8", str(path), "-"])
+        count = len(re.sub(r"\s+", "", clean_text(raw)))
+        if count:
+            return count
+    return 0
 
 
 def probe_pdf(path: Path) -> dict:

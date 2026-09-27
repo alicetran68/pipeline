@@ -257,13 +257,14 @@ def validate_range(book, start, end, descriptor):
     return pages
 
 
-def plan_render_ranges(queue, progress):
+def plan_render_ranges(queue, progress, force_reprobe=False):
     books = [{**item, "render_profile": render_profile()}
              for shard in queue["shards"] for item in shard["records"]]
     tasks, saved = [], {}
     for book in books:
         prior = progress.get(book["key"], {})
-        existing = prior.get("ranges", {}) if all(prior.get(k) == v for k, v in range_identity(book).items()) else {}
+        existing = (prior.get("ranges", {}) if not force_reprobe
+                    and all(prior.get(k) == v for k, v in range_identity(book).items()) else {})
         for start, end in render_ranges(book):
             key = range_id(start, end)
             descriptor = existing.get(key)
@@ -783,7 +784,7 @@ def main():
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream)
             queue["kind"] = "pdf-render-queue"
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
-            queue = plan_render_ranges(queue, render_progress)
+            queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe)
         else:
             progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
             if args.source_repo:

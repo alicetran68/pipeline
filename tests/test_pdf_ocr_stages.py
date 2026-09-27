@@ -121,6 +121,15 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(queue["saved_ranges"], {})
         self.assertEqual(len(queue["shards"][0]["records"]), 1)
 
+    def test_force_reprobe_does_not_reuse_saved_render_ranges(self):
+        queue = {"shards": [{"records": [{**self.item(), "key": "repo\\0book.pdf",
+                                             "probe": {"page_count": 2, "classification": "scan"},
+                                             "page_count": 2, "source_sha256": "a" * 64,
+                                             "source_revision": "revision", "source_kind": "upstream"}]}]}
+        planned = stages.plan_render_ranges(queue, {"repo\\0book.pdf": {"ranges": {"000001-000002": {}}}},
+                                            force_reprobe=True)
+        self.assertEqual(len(planned["shards"]), 1)
+
     def test_partial_native_text_prevents_source_pixel_cap(self):
         source = self.root / "mixed-input.pdf"
         source.write_bytes(b"%PDF-test-source")
