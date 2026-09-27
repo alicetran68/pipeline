@@ -274,14 +274,29 @@ def page_text_probe(path: Path, page: int) -> int:
     return 0
 
 
+def document_text_probe(path: Path, page_count: int) -> list[int]:
+    """Extract a document's text once, then split it into PDF pages.
+
+    Starting Poppler once per page makes planning multi-thousand-page books
+    needlessly slow.  Keep the alternate extraction modes because repaired
+    CJK fonts may only decode through ``-raw`` or ``-layout`` on some Poppler
+    builds.
+    """
+    for mode in ([], ["-raw"], ["-layout"]):
+        try:
+            raw = _run(["pdftotext", *mode, "-enc", "UTF-8", str(path), "-"])
+        except RuntimeError:
+            continue
+        pages = raw.split("\f")[:page_count]
+        counts = [len(re.sub(r"\s+", "", clean_text(text))) for text in pages]
+        if any(counts) or not raw:
+            return counts + [0] * (page_count - len(counts))
+    return [0] * page_count
+
+
 def probe_pdf(path: Path) -> dict:
     page_count = pdf_page_count(path)
-    page_chars = []
-    for page in range(1, page_count + 1):
-        try:
-            page_chars.append(page_text_probe(path, page))
-        except RuntimeError:
-            page_chars.append(0)
+    page_chars = document_text_probe(path, page_count)
     native_pages = sum(chars >= MIN_NATIVE_PAGE_CHARS for chars in page_chars)
     ratio = native_pages / page_count
     if native_pages == page_count:
