@@ -1,9 +1,13 @@
 # 林一章版 PDF 字体修复
 
-`reader_assets.KNOWN_GBK_PDFS` 精确列出 Teachers 的 11 个分册和合订本。
+`reader_assets.KNOWN_GBK_PDFS` 精确列出 Teachers 的 11 个分册和合订本；
+`GBK_PDF_REPAIR_FOLDERS` 仅扩展到抽查确认存在同类无嵌入 GBK 字体的
+马恩新版/选集、列宁选集、斯大林旧版全集/选集、毛选和鲁迅系列。
+马恩旧版、列宁新版等已有正常嵌入字体/文字的系列不进入修复队列。
 这些文件的正文包含 GBK 双字节字符，字体却声明为单字节 WinAnsi TrueType。
 分册附带的单字节 ToUnicode 表与正文不匹配；合订本还丢失了 FontDescriptor
-中的中文字体名及 ToUnicode。当前 PDF.js 可出现韩文、方框或西文乱码。
+中的中文字体名及 ToUnicode；其他同类文件也可能没有 ToUnicode。
+当前 PDF.js 可出现韩文、方框或西文乱码。
 
 `gbk-font-repair-v1` 生成独立的 Reader PDF，使用 Type0、GBK-EUC-H、Adobe-GB1
 及显式 GBK→Unicode 映射，修复宋体、黑体、仿宋、楷体。字体依旧使用系统替代，
@@ -24,7 +28,7 @@ python3 -B scripts/repair_gbk_pdf.py input.pdf repaired.pdf
 快速回归：
 
 ```bash
-python3 -B -m unittest tests.test_repair_gbk_pdf tests.test_reader_assets -v
+python3 -B -m unittest tests.test_repair_gbk_pdf tests.test_lin_pdf_text tests.test_reader_assets -v
 ```
 
 测试覆盖来源范围、字体判定、嵌入字体及有效字符映射的保护、原件不覆盖、共享字体、

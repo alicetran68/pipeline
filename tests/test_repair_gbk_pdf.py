@@ -65,6 +65,12 @@ class GbkPdfRepairTests(unittest.TestCase):
         self.assertIsNone(reader_assets.source_conversion_contract("other", known_path, "pdf"))
         self.assertIsNone(reader_assets.source_conversion_contract(
             "VoiceOfML/Teachers", reader_assets.GBK_PDF_FOLDER + "/new.pdf", "pdf"))
+        for folder in reader_assets.GBK_PDF_REPAIR_FOLDERS:
+            self.assertEqual(reader_assets.source_conversion_contract(
+                "VoiceOfML/Teachers", folder + "/volume.pdf", "pdf"), reader_assets.GBK_PDF_CONTRACT)
+            self.assertFalse(reader_assets.known_gbk_pdf("Other/Teachers", folder + "/volume.pdf"))
+        self.assertIsNone(reader_assets.source_conversion_contract(
+            "VoiceOfML/Teachers", "A1 马克思&恩格斯/01-03 马克思恩格斯全集 林一章旧版（博览网版）/1上.pdf", "pdf"))
 
     def test_repair_keeps_pages_content_geometry_metadata_and_outline(self):
         with tempfile.TemporaryDirectory() as root:
@@ -131,6 +137,15 @@ class GbkPdfRepairTests(unittest.TestCase):
             font["/FontDescriptor"][NameObject("/FontName")] = TextStringObject("????")
             del font["/ToUnicode"]
             self.assertEqual(repair_gbk_pdf.repairable_font(font), expected)
+
+    def test_missing_unicode_map_with_matching_legacy_descriptor(self):
+        for base, descriptor in [("宋体", "ËÎÌå"), ("仿宋_GB2312", "·ÂËÎÌå"),
+                                 ("黑体", "Ð¡±êËÎ")]:
+            font = PdfReader(io.BytesIO(fixture())).pages[0]["/Resources"]["/Font"]["/F1"]
+            font[NameObject("/BaseFont")] = NameObject("/" + base)
+            font["/FontDescriptor"][NameObject("/FontName")] = TextStringObject(descriptor)
+            del font["/ToUnicode"]
+            self.assertIsNotNone(repair_gbk_pdf.repairable_font(font))
 
     def test_refuses_overwrite_and_unmatched_source(self):
         with tempfile.TemporaryDirectory() as root:

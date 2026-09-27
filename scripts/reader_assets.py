@@ -66,6 +66,16 @@ CONVERTIBLE_EXTENSIONS = {
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 GBK_PDF_CONTRACT = ("gbk-font-repair-v1", "pdf", "document.pdf")
 GBK_PDF_FOLDER = "A4 毛泽东主席/03-03 建国以来毛泽东文稿 林一章版"
+GBK_PDF_REPAIR_FOLDERS = (
+    "A1 马克思&恩格斯/01-04 马克思恩格斯全集 林一章新版",
+    "A1 马克思&恩格斯/02-05 马克思恩格斯选集 林一章版",
+    "A2 列宁/02-06 列宁选集 林一章版（博览网版）",
+    "A3 斯大林/01-04 斯大林全集 林一章旧版",
+    "A3 斯大林/02-01 斯大林选集 林一章旧版（博览网版）",
+    "A4 毛泽东主席/02-03 毛泽东选集 林一章版 第一版",
+    "A4 毛泽东主席/02-05 毛泽东选集 林一章版（博览网版）第二版",
+    "其他/鲁迅/鲁迅全集 林一章版",
+)
 KNOWN_GBK_PDFS = {
     ("VoiceOfML/Teachers", f"{GBK_PDF_FOLDER}/{name}.pdf")
     for name in (
@@ -77,6 +87,15 @@ KNOWN_GBK_PDFS = {
         "第11册 (1964.1-1965.12)",
     )
 }
+
+
+def known_gbk_pdf(repo: str, path: str) -> bool:
+    return (repo, path) in KNOWN_GBK_PDFS or (
+        repo == "VoiceOfML/Teachers" and isinstance(path, str) and path.lower().endswith(".pdf")
+        and any(path.startswith(folder + "/") for folder in GBK_PDF_REPAIR_FOLDERS)
+    )
+
+
 PASSWORD_RE = re.compile(
     r"(?:密码|口令|password|passwd)\s*(?:[：:=]\s*|(?=[A-Za-z0-9]))"
     r"([^\s\]〕】）)},，；;]+)",
@@ -182,7 +201,7 @@ def validate_chapter_manifest(manifest: dict) -> dict:
 def source_conversion_contract(repo: str, path: str, extension: str, source_bytes: int = 0):
     if extension in CONVERTIBLE_EXTENSIONS:
         return CONVERTIBLE_EXTENSIONS[extension]
-    if extension == "pdf" and (repo, path) in KNOWN_GBK_PDFS:
+    if extension == "pdf" and known_gbk_pdf(repo, path):
         return GBK_PDF_CONTRACT
     if extension == "pdf" and source_password(repo, path):
         return PROTECTED_PDF_CONTRACT

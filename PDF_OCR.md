@@ -68,11 +68,40 @@ the shared `reader-assets` publication lock.
   completed books independently. Both workflows share only the final
   `reader-assets` publication lock, so a long tail shard cannot block small
   books from being rendered and published.
+  The small-book schedule now runs in `vomebook/pipeline`; its publication
+  dispatches this repository's `Publish Reader Index` workflow. Do not enable
+  the retired local small-book schedule alongside it.
 - Native-text PDFs can join the page-stream queue without OCR: their extracted
   native text remains the search index and their raster pages are only for
   Reader display. The known GBK 林一章版 files are processed only from their
   `gbk-font-repair-v1` Reader PDFs; the original malformed-font PDFs are not
   indexed if a repair asset is unavailable.
+
+### Lin Yizhang text recovery
+
+The known malformed-font Teachers volumes use PyMuPDF 1.28.2 to extract
+Unicode text and positioned lines from the repaired Reader PDF. Poppler on
+the runner has classified some repaired PDFs as scans despite real GBK text;
+do not send those already rendered pages to OCR. Other Lin editions with
+working embedded fonts stay on their existing native PDF path. The explicit
+repair folder allowlist is in `reader_assets.py` and requires a successful
+`gbk-font-repair-v1` asset before a new volume enters this rendering queue.
+
+For an **already rendered** book, first inspect the current Reader-Assets
+registry and validate one book without writing remote data:
+
+```bash
+python3 -B scripts/publish_lin_native_text.py --path 'A4 毛泽东主席/03-03 建国以来毛泽东文稿 林一章版/第10册 (1962.1-1963.12).pdf' --dry-run
+```
+
+After checking its representative page text, rerun without `--dry-run` to
+publish checksummed per-page native text, complete v2 book index and OCR
+manifest while retaining the existing page-manifest/images. Run one book at
+a time under the Reader-Assets publication lock; check Reader text selection
+and exact book search after publishing. The command refuses source digest or
+page-count drift and incomplete native-text coverage. Already rendered GBK
+streams classified as scans are excluded from the automatic image-OCR plan
+pending this text recovery.
 
 ## Recognition
 

@@ -50,7 +50,11 @@ def repairable_font(font) -> str | None:
     # The combined edition lost descriptor names and ToUnicode entirely.
     combined_placeholder = (font.get("/ToUnicode") is None
                             and re.fullmatch(r"\?{4,6}", descriptor_name) is not None)
-    if FONT_NAMES.get(descriptor_name) != FONT_NAMES[name] and not combined_placeholder:
+    # Some other Lin Yizhang volumes have no ToUnicode at all; their heading
+    # font also advertises a legacy small-Song descriptor under a Hei base font.
+    small_song_heading = (name == "黑体" and descriptor_name == "小标宋"
+                          and font.get("/ToUnicode") is None)
+    if FONT_NAMES.get(descriptor_name) != FONT_NAMES[name] and not combined_placeholder and not small_song_heading:
         return None
     if any(key in descriptor for key in ("/FontFile", "/FontFile2", "/FontFile3")):
         return None
@@ -60,7 +64,8 @@ def repairable_font(font) -> str | None:
             or any(width != 500 for width in widths.get_object())):
         return None
     unicode_map = font.get("/ToUnicode")
-    if combined_placeholder:
+    if combined_placeholder or (unicode_map is None and
+                                (FONT_NAMES.get(descriptor_name) == FONT_NAMES[name] or small_song_heading)):
         return FONT_NAMES[name]
     if unicode_map is None or not hasattr(unicode_map.get_object(), "get_data"):
         return None

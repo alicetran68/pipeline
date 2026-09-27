@@ -6,6 +6,7 @@ jieba==0.42.1
 Pillow==12.3.0
 msoffcrypto-tool==6.0.0
 pypdf==6.14.2
+PyMuPDF==1.28.2
 esprima==4.0.1
 ebooklib==0.20
 lxml==6.1.3

@@ -15,10 +15,11 @@ from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_assets, pdf_ocr, shared
+    from . import pdf_assets, pdf_ocr, lin_pdf_text, shared
 except ImportError:
     import pdf_assets
     import pdf_ocr
+    import lin_pdf_text
     import shared
 
 
@@ -81,9 +82,11 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
         try:
             source = download_source(item)
             digest, size = shared.hash_file(source)
-            probe = pdf_ocr.probe_pdf(source)
+            probe = lin_pdf_text.probe(source) if lin_pdf_text.applies(item) else pdf_ocr.probe_pdf(source)
             return {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
                     "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
+                    **({"native_extractor": "pymupdf-v1"} if lin_pdf_text.applies(item)
+                       and probe["native_page_ratio"] >= .8 else {}),
                     **({"force_image_render": True} if native_text_stream
                        and probe["classification"] == "native-text" else {})}
         except Exception as exc:

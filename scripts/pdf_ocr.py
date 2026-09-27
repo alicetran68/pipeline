@@ -893,7 +893,7 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
     # for it instead of indexing the known-bad source text.
     records = [item for item in records if not (
         item.get("source_kind") == "upstream"
-        and (item.get("repo"), item.get("path")) in reader_assets.KNOWN_GBK_PDFS
+        and reader_assets.known_gbk_pdf(item.get("repo"), item.get("path"))
     )]
     by_key = {}
     for item in records:

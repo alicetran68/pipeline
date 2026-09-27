@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import quote
 
@@ -25,10 +26,10 @@ from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
-    from . import pdf_ocr, pdf_assets, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
+    from . import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     from .run_pdf_ocr import source_path, _bucket_retry_delay
 except ImportError:
-    import pdf_ocr, pdf_assets, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
+    import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     from run_pdf_ocr import source_path, _bucket_retry_delay
 
 RENDER_REGISTRY = "pdf_render_manifest.json"
@@ -289,7 +290,8 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     source_sha, source_bytes = shared.hash_file(source)
     if item.get("source_sha256") and item["source_sha256"] != source_sha:
         raise ValueError("PDF source changed after planning")
-    probe = item.get("probe") or pdf_ocr.probe_pdf(source)
+    lin_native = lin_pdf_text.applies(item)
+    probe = item.get("probe") or (lin_pdf_text.probe(source) if lin_native else pdf_ocr.probe_pdf(source))
     if "start" in item and not 1 <= item["start"] <= item["end"] <= probe["page_count"]:
         raise ValueError("invalid render page range")
     base = {**public_item(item), "source_sha256": source_sha, "source_bytes": source_bytes,
@@ -303,14 +305,15 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     scan_images = (pdf_ocr.scan_reader_images(source, first, last)
                    if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
-    with tempfile.TemporaryDirectory(dir=bundle) as temp:
+    with tempfile.TemporaryDirectory(dir=bundle) as temp, (
+            lin_pdf_text.pymupdf.open(source) if lin_native else nullcontext(None)) as document:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text" and not force_image_render:
-                text = pdf_ocr.native_page(source, number)
+                text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
-                payload["text"] = text["text"]
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
-                payload["text"] = text["text"]
+                if not lin_native:
+                    payload["text"] = text["text"]
                 out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 page = {"p": number, "source": "native", "width": text["width"], "height": text["height"],
@@ -336,11 +339,11 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 pdf_ocr.encode_jxl(reader_png if reader_png.is_file() else bundle / page["i"], jxl)
                 set_page_meta(page, "j", metadata(jxl, bundle))
             if native:
-                text = pdf_ocr.native_page(source, number)
+                text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
-                payload["text"] = text["text"]
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
-                payload["text"] = text["text"]
+                if not lin_native:
+                    payload["text"] = text["text"]
                 out = bundle / root / "ocr" / f"page-{number:06d}.json.gz"
                 pdf_ocr.write_gzip_json(out, payload)
                 set_page_meta(page, "o", metadata(out, bundle))
@@ -466,7 +469,9 @@ def skip_ocr_for_generated_text_pdf(entry: dict) -> bool:
     page and replace the source text with recognition output.
     """
     return (entry.get("source_kind") == "generated"
-            and "/gbk-font-repair-v1/" in str(entry.get("reader_assets_path", "")))
+            and "/gbk-font-repair-v1/" in str(entry.get("reader_assets_path", ""))
+            and not (entry.get("native_extractor") == "pymupdf-v1"
+                     and entry.get("classification") in {"native-text", "mixed"}))
 
 
 def generation_for(book):
