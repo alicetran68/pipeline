@@ -67,8 +67,10 @@ class DispatchPdfRenderTests(unittest.TestCase):
         self.assertIn("scripts/dispatch_pdf_render.py", controller_workflow["jobs"]["dispatch"]["steps"][-1]["run"])
         self.assertFalse((root / ".github/workflows/scheduled-pdf-render.yml").exists())
         self.assertIn("continue_queue", renderer[True]["workflow_dispatch"]["inputs"])
-        self.assertIn("notify-controller", renderer["jobs"])
-        self.assertIn("book_count", renderer["jobs"]["plan"]["outputs"])
+        self.assertEqual(renderer["run-name"], "${{ inputs.continue_queue == true && 'Serial large PDF render' || 'Manual large PDF render' }}")
+        self.assertEqual(controller_workflow[True]["workflow_run"]["types"], ["completed"])
+        self.assertEqual(controller_workflow[True]["workflow_run"]["workflows"], ["Render PDF OCR Inputs"])
+        self.assertIn("display_title == 'Serial large PDF render'", controller_workflow["jobs"]["dispatch"]["if"])
 
 
 if __name__ == "__main__":
