@@ -23,6 +23,10 @@ on:
         description: Publish existing render artifacts from this main-branch render run (no rendering)
         default: ""
         type: string
+      recover_progress_only:
+        description: Checkpoint verified ranges from recover_run without assembling whole books
+        default: false
+        type: boolean
       source_repo:
         description: Exact source dataset filter, or blank for all
         default: ""
@@ -169,8 +173,17 @@ jobs:
       - name: Publish complete image inputs and Reader streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/pdf_ocr_stages.py publish-render --results-dir output/pdf-ocr/results
+          PROGRESS_ONLY: ${{ inputs.recover_progress_only || 'false' }}
+          RECOVER_RUN: ${{ inputs.recover_run || '' }}
+        run: |
+          args=()
+          if [[ "$PROGRESS_ONLY" == true ]]; then
+            test -n "$RECOVER_RUN"
+            args+=(--recover-progress-only)
+          fi
+          python scripts/pdf_ocr_stages.py publish-render --results-dir output/pdf-ocr/results "${args[@]}"
       - name: Publish Reader sidecar to Pages
+        if: inputs.recover_progress_only != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}

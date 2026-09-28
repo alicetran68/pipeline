@@ -846,6 +846,50 @@ def read_results(paths):
     return results
 
 
+def recover_render_progress(queue, results, api, repo, batch_size=12):
+    """Checkpoint verified ranges from a completed render run before assembly."""
+    books = {book["key"]: book for book in queue["books"]}
+    planned = {(task["key"], task["start"], task["end"]): task
+               for task in expand_render_tasks(queue, [record for shard in queue["shards"]
+                                                 for record in shard["records"]])}
+    revision = retry(lambda: api.repo_info(repo_id=repo, repo_type="dataset")).sha
+    registry = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
+    saved = {key: dict(value.get("ranges", {})) for key, value in registry.items()
+             if key in books and isinstance(value, dict)
+             and all(value.get(field) == identity for field, identity in range_identity(books[key]).items())}
+    pending = {}
+    validated = 0
+    for result in results:
+        item = planned.get((result.get("key"), result.get("start"), result.get("end")))
+        if not item or any(result.get(field) != value for field, value in range_identity(item).items()):
+            raise ValueError("render result does not match source queue")
+        if result.get("status") != "range":
+            continue
+        name = range_id(item["start"], item["end"])
+        previous = saved.get(item["key"], {}).get(name)
+        if previous:
+            # A newer render may already have replaced a range. Preserve it.
+            continue
+        validate_range(item, item["start"], item["end"], result["descriptor"])
+        saved.setdefault(item["key"], {})[name] = result["descriptor"]
+        entry = pending.setdefault(item["key"], {**range_identity(books[item["key"]]),
+                                                 "ranges": {}, "range_timings": {}})
+        entry["ranges"][name] = result["descriptor"]
+        timing = result.get("timing", {})
+        if (isinstance(timing, dict) and timing.get("page_count") == item["end"] - item["start"] + 1
+                and pdf_render_schedule.finite_seconds(timing.get("page_seconds"), positive=True) is not None
+                and pdf_render_schedule.finite_seconds(timing.get("setup_seconds")) is not None):
+            entry["range_timings"][name] = timing
+        validated += 1
+        if validated % batch_size == 0:
+            save_registry(api, repo, RENDER_PROGRESS_REGISTRY, pending, merge=merge_render_ranges)
+            print(f"saved {validated} recovered ranges", flush=True)
+            pending = {}
+    if pending:
+        save_registry(api, repo, RENDER_PROGRESS_REGISTRY, pending, merge=merge_render_ranges)
+    print(f"recovered {validated} new ranges; already saved ranges retained", flush=True)
+
+
 def result_paths(paths, directory, expected=False):
     found = set(paths)
     if directory and directory.is_dir():
@@ -892,6 +936,7 @@ def main():
     parser.add_argument("--native-text-stream", action="store_true")
     parser.add_argument("--target-render-seconds", type=int)
     parser.add_argument("--retry-failed-only", action="store_true")
+    parser.add_argument("--recover-progress-only", action="store_true")
     parser.add_argument("--results", type=Path, nargs="*", default=[])
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
@@ -955,6 +1000,11 @@ def main():
     if args.stage == "publish-render":
         queue = json.loads(args.queue.read_text(encoding="utf-8"))
         results = read_results(result_paths(args.results, args.results_dir, False))
+        if args.recover_progress_only:
+            if "books" not in queue or not results:
+                raise ValueError("range recovery requires a nonempty render queue and results")
+            recover_render_progress(queue, results, api, repo)
+            return 0
         if "books" not in queue:
             if queue["shards"] and not results:
                 raise ValueError("planned workers but no result artifacts found; refusing empty publication")

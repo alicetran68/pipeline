@@ -60,7 +60,11 @@ the shared `reader-assets` publication lock.
   render run without recomputing or reuploading its PNG images. Large batches
   fetch result artifacts serially with secondary-rate-limit backoff before
   publication; downloading hundreds concurrently can fail before any progress
-  reaches Reader-Assets.
+  reaches Reader-Assets. For an interrupted large recovery, dispatch with
+  `recover_run` and `recover_progress_only=true`: verified ranges are saved in
+  small batches, and repeated recovery skips ranges already recorded remotely.
+  This mode does not assemble or expose complete books; render publication must
+  follow after missing ranges are built.
 - Books over 500 pages are scheduled in 250-page ranges; smaller books remain
   single tasks. Eighteen render workers may run concurrently. Each range uploads
   its immutable pages and checksummed range descriptor before the worker writes

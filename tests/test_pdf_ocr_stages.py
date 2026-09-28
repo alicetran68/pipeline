@@ -294,6 +294,36 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertGreater(queue["shard_count"], 1)
         self.assertLessEqual(max(s["page_count"] for s in queue["shards"]), 500)
 
+    def test_recovery_checkpoints_ranges_and_skips_already_published_progress(self):
+        book = {**self.item(), "source_sha256": "a" * 64, "page_count": 3,
+                "render_profile": stages.render_profile()}
+        identity = stages.range_identity(book)
+        tasks = [{**identity, "start": page, "end": page} for page in (1, 2, 3)]
+        queue = {"books": [book], "shards": [{"records": tasks}]}
+        results = [{**task, "status": "range", "descriptor": {"path": str(task["start"])}}
+                   for task in tasks]
+        remote = {book["key"]: {**identity, "ranges": {"000001-000001": results[0]["descriptor"]}}}
+        api = Mock()
+        api.repo_info.return_value.sha = "revision"
+        with patch.object(stages, "load_registry", return_value={"files": remote}), \
+                patch.object(stages, "validate_range") as validate, \
+                patch.object(stages, "save_registry") as save:
+            stages.recover_render_progress(queue, results, api, "test/repo", batch_size=1)
+        self.assertEqual([call.args[1] for call in validate.call_args_list], [2, 3])
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual([list(call.args[3][book["key"]]["ranges"]) for call in save.call_args_list],
+                         [["000002-000002"], ["000003-000003"]])
+        self.assertTrue(all(call.kwargs["merge"] is stages.merge_render_ranges for call in save.call_args_list))
+        with patch.object(stages, "load_registry", return_value={"files": {book["key"]: {
+                **identity, "ranges": {"000001-000001": results[0]["descriptor"],
+                                       "000002-000002": results[1]["descriptor"],
+                                       "000003-000003": results[2]["descriptor"]}}}}), \
+                patch.object(stages, "validate_range") as validate, \
+                patch.object(stages, "save_registry") as save:
+            stages.recover_render_progress(queue, results, api, "test/repo", batch_size=1)
+        validate.assert_not_called()
+        save.assert_not_called()
+
     def test_cost_sampling_uses_three_real_render_paths_without_uploading(self):
         item = {**self.item(), "source_sha256": "a" * 64, "page_count": 1000}
         samples = [{"timing": {"page_seconds": value, "setup_seconds": 2}} for value in (1, 20, 3)]
