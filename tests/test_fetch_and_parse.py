@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,7 +38,26 @@ class FetchAndParseTests(unittest.TestCase):
 
     def test_write_action_output_is_optional_outside_actions(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.module.write_action_output("data_changed", "true")
+                self.module.write_action_output("data_changed", "true")
+
+    def test_http_get_json_retries_connection_reset_then_succeeds(self):
+        response = type("Response", (), {
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *_: None,
+            "read": lambda self: b'{"ok": true}',
+        })()
+        error = urllib.error.URLError(ConnectionResetError("peer reset"))
+        with patch.object(self.module.urllib.request, "urlopen", side_effect=[error, error, response]), \
+             patch.object(self.module.time, "sleep") as sleep:
+            self.assertEqual(self.module.http_get_json("https://example.test"), {"ok": True})
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_http_get_json_retries_server_errors_and_fails_after_bound(self):
+        error = urllib.error.HTTPError("https://example.test", 503, "busy", {}, None)
+        with patch.object(self.module.urllib.request, "urlopen", side_effect=[error] * 5), \
+             patch.object(self.module.time, "sleep") as sleep:
+            self.assertEqual(self.module.http_get_json("https://example.test"), {})
+        self.assertEqual(sleep.call_count, 4)
 
     def test_main_reports_unchanged_without_generating_output(self):
         with tempfile.TemporaryDirectory() as temporary:

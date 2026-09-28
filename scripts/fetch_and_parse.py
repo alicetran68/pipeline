@@ -87,21 +87,30 @@ def _make_request(url: str, token: str) -> urllib.request.Request:
 
 
 def http_get_json(url: str, token: str = "") -> dict | list:
-    """GET JSON 端点，遇 429 自动重试，带指数退避。"""
-    for attempt in range(3):
+    """GET JSON endpoint with bounded retries for transient failures."""
+    max_attempts = 5
+    for attempt in range(max_attempts):
         try:
             with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                wait = 2 ** attempt
-                print(f"  ⏳ 频率限制 (429)，等待 {wait}s 后重试...")
-                time.sleep(wait)
-                continue
+            if e.code == 429 or 500 <= e.code <= 599:
+                if attempt + 1 < max_attempts:
+                    wait = min(30, 2 ** attempt)
+                    print(f"  ⏳ HTTP {e.code}，等待 {wait}s 后重试...")
+                    time.sleep(wait)
+                    continue
+                print(f"  ⚠ HTTP {e.code}: {url}")
+                return {}
             print(f"  ⚠ HTTP {e.code}: {url}")
             return {}
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            if attempt + 1 < max_attempts:
+                wait = min(30, 2 ** attempt)
+                print(f"  ⏳ 网络错误，等待 {wait}s 后重试 [{url}]: {e}")
+                time.sleep(wait)
+                continue
             print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
             return {}
     return {}
