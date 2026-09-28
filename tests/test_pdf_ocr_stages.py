@@ -547,26 +547,6 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(stages.render_partition_matches(large, "large"))
         self.assertTrue(stages.render_partition_matches(small, "all"))
 
-    def test_partition_boundary_balances_source_bytes(self):
-        records = [
-            {"key": "a", "source_bytes": 40 * 1024 ** 2},
-            {"key": "b", "source_bytes": 60 * 1024 ** 2},
-            {"key": "c", "source_bytes": 140 * 1024 ** 2},
-            {"key": "d", "source_bytes": 160 * 1024 ** 2},
-        ]
-        threshold = stages.balanced_render_partition_threshold(records)
-        self.assertEqual(threshold, 160 * 1024 ** 2)
-        self.assertEqual(
-            sum(item["source_bytes"] for item in records
-                if stages.render_partition_matches(item, "small", threshold)),
-            240 * 1024 ** 2,
-        )
-        self.assertEqual(
-            sum(item["source_bytes"] for item in records
-                if stages.render_partition_matches(item, "large", threshold)),
-            160 * 1024 ** 2,
-        )
-
     def test_large_render_planner_expands_short_book_to_eighteen_shards(self):
         book = {**self.item(), "source_sha256": "a" * 64, "page_count": 100,
                 "profile": pdf_ocr.asset_profile()}

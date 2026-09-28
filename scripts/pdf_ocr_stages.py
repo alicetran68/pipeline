@@ -190,46 +190,20 @@ def same_source(entry, item):
                 and entry.get("reader_assets_path") == item.get("reader_assets_path"))
 
 
-def balanced_render_partition_threshold(records):
-    """Pick a size boundary that keeps source bytes close between partitions."""
-    values = sorted(
-        (int(item.get("source_bytes") or 0), str(item.get("key") or ""))
-        for item in records if int(item.get("source_bytes") or 0) > 0
-    )
-    if len(values) < 2:
-        return SMALL_RENDER_MAX_SOURCE_BYTES
-    total = sum(size for size, _ in values)
-    prefix = 0
-    candidates = []
-    for index, (size, _key) in enumerate(values[:-1]):
-        prefix += size
-        next_size = values[index + 1][0]
-        if size >= next_size:
-            continue
-        threshold = next_size
-        candidates.append((abs(prefix - (total - prefix)),
-                           abs(threshold - SMALL_RENDER_MAX_SOURCE_BYTES), threshold))
-    if not candidates:
-        return SMALL_RENDER_MAX_SOURCE_BYTES
-    return min(candidates)[2]
-
-
-def render_partition_matches(item, partition, threshold=None):
+def render_partition_matches(item, partition):
     if partition == "all":
         return True
     size = int(item.get("source_bytes") or 0)
     if not size:
         return partition == "small"
-    is_small = size < (threshold or SMALL_RENDER_MAX_SOURCE_BYTES)
+    is_small = size < SMALL_RENDER_MAX_SOURCE_BYTES
     return is_small if partition == "small" else not is_small
 
 
-def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False,
-                   partition_threshold=None):
+def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False):
     pending = []
-    threshold = partition_threshold or balanced_render_partition_threshold(records)
     for item in records:
-        if not render_partition_matches(item, partition, threshold):
+        if not render_partition_matches(item, partition):
             continue
         if force_reprobe:
             pending.append(item)
@@ -1025,11 +999,8 @@ def main():
             if args.source_path_prefix:
                 records = [item for item in records
                            if str(item.get("path", "")).startswith(args.source_path_prefix)]
-            partition_threshold = (balanced_render_partition_threshold(records)
-                                  if args.partition != "all" else None)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition,
-                                     force_reprobe=args.force_reprobe,
-                                     partition_threshold=partition_threshold)
+                                     force_reprobe=args.force_reprobe)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
             estimator = (lambda item, source: estimate_render_cost(item, source, render_progress)) \
@@ -1037,8 +1008,6 @@ def main():
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream,
                                       render_estimator=estimator)
             queue["kind"] = "pdf-render-queue"
-            if partition_threshold is not None:
-                queue["render_partition_threshold"] = partition_threshold
             queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe,
                                        target_seconds=args.target_render_seconds)
         else:
