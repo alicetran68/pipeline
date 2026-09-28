@@ -14,8 +14,8 @@ WORKFLOW = "pdf-render-inputs.yml"
 
 
 class _SafeRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, request, file, code, message, new_url):
-        redirected = super().redirect_request(request, file, code, message, new_url)
+    def redirect_request(self, request, file, code, message, headers, new_url):
+        redirected = super().redirect_request(request, file, code, message, headers, new_url)
         if redirected and urlparse(request.full_url).netloc != urlparse(new_url).netloc:
             redirected.headers.pop("Authorization", None)
             redirected.unredirected_hdrs.pop("Authorization", None)
