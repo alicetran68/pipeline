@@ -53,6 +53,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/prune_reader_assets.py "${args[@]}"
       - name: Report and optionally prune unreferenced PDF Bucket roots
+        if: github.event_name == 'workflow_dispatch' || vars.PDF_BUCKET_GC_REPORT == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
