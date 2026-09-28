@@ -160,13 +160,12 @@ jobs:
           path: output/pdf-ocr
           github-token: ${{ github.token }}
           run-id: ${{ inputs.recover_run || github.run_id }}
-      - uses: actions/download-artifact@v8
+      - name: Download render results at a controlled rate
         if: needs.build.result != 'skipped' || inputs.recover_run != ''
-        with:
-          pattern: pdf-render-results-*
-          path: output/pdf-ocr/results
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.recover_run || github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RENDER_RUN: ${{ inputs.recover_run || github.run_id }}
+        run: python scripts/download_pdf_render_results.py --repo "${{ github.repository }}" --run-id "$RENDER_RUN" --output output/pdf-ocr/results
       - name: Publish complete image inputs and Reader streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

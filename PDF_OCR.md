@@ -57,7 +57,10 @@ the shared `reader-assets` publication lock.
   multi-artifact downloads. Legacy runs with no result files fail explicitly;
   range runs record incomplete books and retry missing ranges on the next run.
   `recover_run` republishes validated artifacts from a completed main-branch
-  render run without recomputing or reuploading its PNG images.
+  render run without recomputing or reuploading its PNG images. Large batches
+  fetch result artifacts serially with secondary-rate-limit backoff before
+  publication; downloading hundreds concurrently can fail before any progress
+  reaches Reader-Assets.
 - Books over 500 pages are scheduled in 250-page ranges; smaller books remain
   single tasks. Eighteen render workers may run concurrently. Each range uploads
   its immutable pages and checksummed range descriptor before the worker writes
