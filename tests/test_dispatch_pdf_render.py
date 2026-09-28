@@ -40,11 +40,11 @@ class DispatchPdfRenderTests(unittest.TestCase):
                 return Response(b'{"workflow_runs":[{"status":"completed"}]}')
             self.assertEqual(request.full_url, "https://api.github.com/repos/anftm/pipeline/actions/workflows/pdf-render-inputs.yml/dispatches")
             self.assertEqual(json.loads(request.data), {"ref": "main", "inputs": {
-                "limit": "1", "checkpoint": "0", "retry_failed": "true",
+                "limit": "1", "queue_lane": "2", "checkpoint": "0", "retry_failed": "true",
                 "continue_queue": "true"}})
             return Response(b"", status=204)
         with patch.object(controller, "urlopen", side_effect=respond) as open_url:
-            self.assertTrue(controller.dispatch("anftm/pipeline", "token"))
+            self.assertTrue(controller.dispatch("anftm/pipeline", "token", lane_index=2))
             self.assertEqual(open_url.call_count, 2)
 
     def test_failed_serial_run_continues_without_retrying_failed_book(self):
@@ -107,17 +107,21 @@ class DispatchPdfRenderTests(unittest.TestCase):
         self.assertNotIn("schedule", renderer[True])
         self.assertEqual(controller_workflow["concurrency"]["queue"], "max")
         self.assertEqual(renderer["concurrency"]["group"],
-                         "${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}")
+                         "${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || format('pdf-render-inputs-queue-{0}', inputs.queue_lane || '0') }}")
         self.assertEqual(renderer[True]["workflow_dispatch"]["inputs"]["render_lane"]["default"], "")
         self.assertIn("scripts/dispatch_pdf_render.py", controller_workflow["jobs"]["dispatch"]["steps"][-1]["run"])
         self.assertFalse((root / ".github/workflows/scheduled-pdf-render.yml").exists())
         self.assertIn("continue_queue", renderer[True]["workflow_dispatch"]["inputs"])
+        self.assertEqual(renderer[True]["workflow_dispatch"]["inputs"]["queue_lane"]["default"], "0")
         self.assertEqual(renderer["run-name"], "${{ inputs.continue_queue == true && 'Serial large PDF render' || 'Manual large PDF render' }}")
         self.assertEqual(controller_workflow[True]["workflow_run"]["types"], ["completed"])
         self.assertEqual(controller_workflow[True]["workflow_run"]["workflows"], ["Render PDF OCR Inputs"])
         self.assertIn("display_title == 'Serial large PDF render'", controller_workflow["jobs"]["dispatch"]["if"])
         self.assertIn("conclusion == 'failure'", controller_workflow["jobs"]["dispatch"]["if"])
         self.assertIn("SOURCE_RUN", controller_workflow["jobs"]["dispatch"]["steps"][-1]["env"])
+        self.assertIn("vars.PDF_RENDER_QUEUE_LANE",
+                      controller_workflow["jobs"]["dispatch"]["steps"][-1]["env"]["QUEUE_LANE"])
+        self.assertIn("--lane-index", controller_workflow["jobs"]["dispatch"]["steps"][-1]["run"])
 
 
 if __name__ == "__main__":

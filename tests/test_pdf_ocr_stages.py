@@ -575,17 +575,30 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(queue["shard_count"], 18)
         self.assertEqual(sum(shard["page_count"] for shard in queue["shards"]), 100)
 
+    def test_render_queue_lanes_are_stable_and_disjoint(self):
+        keys = [f"repo\\0large-{index}.pdf" for index in range(400)]
+        lanes = [{key for key in keys if stages.render_queue_lane_matches(key, index, 4)}
+                 for index in range(4)]
+        self.assertEqual(set.union(*lanes), set(keys))
+        self.assertFalse(any(lanes[left] & lanes[right]
+                             for left in range(4) for right in range(left + 1, 4)))
+
     def test_render_workflow_partitions_and_enables_native_text_streams(self):
         root = Path(__file__).resolve().parents[1]
         large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
         small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
         self.assertIn("plan-render --partition large --native-text-stream", large)
-        self.assertIn("inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs'", large)
+        self.assertIn("inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || format('pdf-render-inputs-queue-{0}', inputs.queue_lane || '0')", large)
+        self.assertIn('--lane-index "$QUEUE_LANE" --lane-count 4', large)
         self.assertIn('[[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]]', large)
         self.assertIn("plan-render --partition small --native-text-stream", small)
         self.assertIn("--source-repo", small)
         self.assertIn("--source-path-prefix", small)
         self.assertIn("fonts-noto-cjk", small)
+        small_workflow = yaml.safe_load(small)
+        self.assertEqual(small_workflow[True]["workflow_dispatch"]["inputs"]["limit"]["default"], "100")
+        self.assertIn("inputs.limit || '100'", small)
+        self.assertEqual(small_workflow["jobs"]["build"]["strategy"]["max-parallel"], 10)
         ocr = (root / ".github/workflows/pdf-ocr-assets.yml").read_text()
         self.assertIn("--source-repo", ocr)
         self.assertIn("--source-path-prefix", ocr)
@@ -775,7 +788,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("inputs.limit || '100'", ocr_text)
         self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
                          ocr["jobs"]["publish"]["concurrency"]["group"])
-        self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 18)
+        self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 12)
+        self.assertEqual(ocr["jobs"]["build"]["strategy"]["max-parallel"], 8)
         self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["target_pages"]["default"], "2000")
 
     def test_scheduled_render_processes_one_book_per_serial_batch(self):
