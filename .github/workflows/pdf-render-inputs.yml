@@ -9,10 +9,6 @@ on:
         description: Maximum pending large PDFs inspected (the controller uses one)
         default: "1"
         type: string
-      queue_lane:
-        description: Stable large-PDF queue lane assigned to this runner repository (0-3)
-        default: "0"
-        type: string
       checkpoint:
         description: Checkpoint in the pending PDF queue
         default: "0"
@@ -58,7 +54,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || format('pdf-render-inputs-queue-{0}', inputs.queue_lane || '0') }}
+  group: ${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}
   cancel-in-progress: false
   queue: max
 
@@ -93,7 +89,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LIMIT: ${{ inputs.limit || '100' }}
-          QUEUE_LANE: ${{ inputs.queue_lane || '0' }}
           CHECKPOINT: ${{ inputs.checkpoint || '0' }}
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
           SOURCE_REPO: ${{ inputs.source_repo || '' }}
@@ -102,7 +97,6 @@ jobs:
           FORCE_REPROBE: ${{ inputs.force_reprobe || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
-          [[ "$QUEUE_LANE" =~ ^[0-3]$ ]] || exit 1
           [[ "$CHECKPOINT" =~ ^[0-9]+$ ]] || exit 1
           if [[ -n "$RENDER_LANE" ]]; then
             [[ "$RENDER_LANE" =~ ^[a-z0-9-]{1,32}$ ]] && [[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]] || exit 1
@@ -110,7 +104,6 @@ jobs:
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi
-          args+=(--lane-index "$QUEUE_LANE" --lane-count 4)
           python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --target-render-seconds 1500 --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"

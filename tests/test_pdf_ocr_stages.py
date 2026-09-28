@@ -575,21 +575,12 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(queue["shard_count"], 18)
         self.assertEqual(sum(shard["page_count"] for shard in queue["shards"]), 100)
 
-    def test_render_queue_lanes_are_stable_and_disjoint(self):
-        keys = [f"repo\\0large-{index}.pdf" for index in range(400)]
-        lanes = [{key for key in keys if stages.render_queue_lane_matches(key, index, 4)}
-                 for index in range(4)]
-        self.assertEqual(set.union(*lanes), set(keys))
-        self.assertFalse(any(lanes[left] & lanes[right]
-                             for left in range(4) for right in range(left + 1, 4)))
-
     def test_render_workflow_partitions_and_enables_native_text_streams(self):
         root = Path(__file__).resolve().parents[1]
         large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
         small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
         self.assertIn("plan-render --partition large --native-text-stream", large)
-        self.assertIn("inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || format('pdf-render-inputs-queue-{0}', inputs.queue_lane || '0')", large)
-        self.assertIn('--lane-index "$QUEUE_LANE" --lane-count 4', large)
+        self.assertIn("inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs'", large)
         self.assertIn('[[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]]', large)
         self.assertIn("plan-render --partition small --native-text-stream", small)
         self.assertIn("--source-repo", small)

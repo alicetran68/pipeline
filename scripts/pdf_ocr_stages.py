@@ -224,17 +224,6 @@ def render_partition_matches(item, partition, threshold=None):
     return is_small if partition == "small" else not is_small
 
 
-def render_queue_lane_matches(key, lane_index, lane_count=4):
-    if isinstance(lane_index, bool) or not isinstance(lane_index, int):
-        raise ValueError("render queue lane index must be an integer")
-    if isinstance(lane_count, bool) or not isinstance(lane_count, int) or lane_count < 1:
-        raise ValueError("render queue lane count must be a positive integer")
-    if not 0 <= lane_index < lane_count:
-        raise ValueError("render queue lane index is out of range")
-    digest = hashlib.sha256(str(key).encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") % lane_count == lane_index
-
-
 def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False,
                    partition_threshold=None):
     pending = []
@@ -999,8 +988,6 @@ def main():
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--partition", choices=("all", "small", "large"), default="all")
-    parser.add_argument("--lane-index", type=int)
-    parser.add_argument("--lane-count", type=int, default=4)
     parser.add_argument("--native-text-stream", action="store_true")
     parser.add_argument("--target-render-seconds", type=int)
     parser.add_argument("--retry-failed-only", action="store_true")
@@ -1017,9 +1004,6 @@ def main():
     args = parser.parse_args()
     if args.target_render_seconds is not None and (args.target_render_seconds < 1 or args.stage != "plan-render"):
         parser.error("--target-render-seconds requires plan-render and a positive value")
-    if args.lane_index is not None and (args.stage != "plan-render" or args.lane_count < 1
-                                        or not 0 <= args.lane_index < args.lane_count):
-        parser.error("lane-index requires plan-render and must be within lane-count")
     if args.stage == "measure-render":
         if args.source is None:
             parser.error("measure-render requires --source")
@@ -1046,9 +1030,6 @@ def main():
             records = pending_render(records, rendered, current, args.retry_failed, args.partition,
                                      force_reprobe=args.force_reprobe,
                                      partition_threshold=partition_threshold)
-            if args.lane_index is not None:
-                records = [item for item in records if render_queue_lane_matches(
-                    item["key"], args.lane_index, args.lane_count)]
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
             estimator = (lambda item, source: estimate_render_cost(item, source, render_progress)) \
@@ -1056,9 +1037,6 @@ def main():
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream,
                                       render_estimator=estimator)
             queue["kind"] = "pdf-render-queue"
-            if args.lane_index is not None:
-                queue["lane_index"] = args.lane_index
-                queue["lane_count"] = args.lane_count
             if partition_threshold is not None:
                 queue["render_partition_threshold"] = partition_threshold
             queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe,

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Dispatch one large-PDF render book only when the workflow is idle."""
 
-import argparse
 import json
 import io
 import os
@@ -27,7 +26,7 @@ def urlopen(request, timeout=30):
     return build_opener(_SafeRedirectHandler).open(request, timeout=timeout)
 
 
-def queue_has_books(repo, token, run_id, lane_index):
+def queue_has_books(repo, token, run_id):
     if not str(run_id).isdigit():
         raise ValueError("SOURCE_RUN must be a numeric workflow run id")
     base = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}"
@@ -51,16 +50,12 @@ def queue_has_books(repo, token, run_id, lane_index):
     books = data.get("books") if isinstance(data, dict) else None
     if not isinstance(books, list):
         raise ValueError("serial render queue is invalid")
-    if data.get("lane_index", lane_index) != lane_index or data.get("lane_count", 4) != 4:
-        raise ValueError("serial render queue belongs to a different lane")
     return bool(books)
 
 
-def dispatch(repo, token, source_run=None, retry_failed=True, lane_index=0):
+def dispatch(repo, token, source_run=None, retry_failed=True):
     if not repo or not token:
         raise ValueError("REPO and GH_TOKEN are required")
-    if type(lane_index) is not int or not 0 <= lane_index < 4:
-        raise ValueError("large PDF queue lane must be between 0 and 3")
     endpoint = f"https://api.github.com/repos/{repo}/actions/workflows/{WORKFLOW}"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
@@ -73,10 +68,10 @@ def dispatch(repo, token, source_run=None, retry_failed=True, lane_index=0):
     if any(run["status"] in ACTIVE for run in runs):
         print("Large PDF render already pending or active; skipping dispatch.")
         return False
-    if source_run and not queue_has_books(repo, token, source_run, lane_index):
+    if source_run and not queue_has_books(repo, token, source_run):
         print("Serial large PDF render queue is empty; stopping the chain.")
         return False
-    body = json.dumps({"ref": "main", "inputs": {"limit": "1", "queue_lane": str(lane_index), "checkpoint": "0",
+    body = json.dumps({"ref": "main", "inputs": {"limit": "1", "checkpoint": "0",
                                                   "retry_failed": "true" if retry_failed else "false",
                                                   "continue_queue": "true"}}).encode()
     request = Request(endpoint + "/dispatches", data=body,
@@ -89,9 +84,6 @@ def dispatch(repo, token, source_run=None, retry_failed=True, lane_index=0):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--lane-index", type=int, default=int(os.environ.get("QUEUE_LANE", "0")))
-    args = parser.parse_args()
     retry_failed = os.environ.get("RETRY_FAILED", "true").lower() in {"1", "true", "yes"}
     dispatch(os.environ.get("REPO"), os.environ.get("GH_TOKEN"),
-             os.environ.get("SOURCE_RUN") or None, retry_failed, args.lane_index)
+             os.environ.get("SOURCE_RUN") or None, retry_failed)
