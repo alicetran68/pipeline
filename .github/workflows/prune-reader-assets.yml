@@ -20,6 +20,16 @@ on:
         required: true
         default: "1000"
         type: string
+      bucket_apply:
+        description: Delete unreferenced PDF Bucket roots (keep false until OCR/JXL migration is stable)
+        required: true
+        default: false
+        type: boolean
+      bucket_grace_days:
+        description: Days an unreferenced PDF Bucket root must remain before deletion
+        required: true
+        default: "30"
+        type: string
 
 concurrency:
   group: reader-assets
@@ -42,3 +52,13 @@ jobs:
           args=(--grace-days "${{ inputs.grace_days || '14' }}" --limit "${{ inputs.limit || '1000' }}")
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/prune_reader_assets.py "${args[@]}"
+      - name: Report and optionally prune unreferenced PDF Bucket roots
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          args=(--grace-days "${{ inputs.bucket_grace_days || '30' }}" --limit "${{ inputs.limit || '1000' }}")
+          if { [[ "${{ github.event_name }}" == "schedule" ]] && [[ "${{ vars.PDF_BUCKET_GC_APPLY }}" == "true" ]]; } || \
+             { [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && [[ "${{ inputs.bucket_apply }}" == "true" ]]; }; then
+            args+=(--apply --allow-unreferenced)
+          fi
+          python scripts/prune_pdf_bucket.py "${args[@]}"
