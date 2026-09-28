@@ -1,6 +1,7 @@
 import io
 import json
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,13 @@ class Response(io.BytesIO):
 
 
 class DispatchPdfRenderTests(unittest.TestCase):
+    @staticmethod
+    def queue_archive(books):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.writestr("queue.json", json.dumps({"books": books}))
+        return output.getvalue()
+
     def test_pending_queued_and_running_batches_prevent_duplicate_dispatch(self):
         for status in controller.ACTIVE:
             with self.subTest(status=status), patch.object(controller, "urlopen", return_value=Response(
@@ -38,6 +46,43 @@ class DispatchPdfRenderTests(unittest.TestCase):
         with patch.object(controller, "urlopen", side_effect=respond) as open_url:
             self.assertTrue(controller.dispatch("anftm/pipeline", "token"))
             self.assertEqual(open_url.call_count, 2)
+
+    def test_failed_serial_run_continues_without_retrying_failed_book(self):
+        archive = self.queue_archive([{"key": "repo\\0book.pdf"}])
+
+        def respond(request, timeout):
+            if request.full_url.endswith("/runs?per_page=100"):
+                return Response(b'{"workflow_runs":[{"status":"completed"}]}')
+            if request.full_url.endswith("/artifacts?per_page=100"):
+                return Response(json.dumps({"artifacts": [{
+                    "name": "pdf-render-queue", "expired": False,
+                    "archive_download_url": "https://api.github.com/archive.zip",
+                }]}).encode())
+            if request.full_url.endswith("/archive.zip"):
+                return Response(archive)
+            self.assertEqual(json.loads(request.data)["inputs"]["retry_failed"], "false")
+            return Response(b"", status=204)
+
+        with patch.object(controller, "urlopen", side_effect=respond) as open_url:
+            self.assertTrue(controller.dispatch("anftm/pipeline", "token", "123", False))
+            self.assertEqual(open_url.call_count, 4)
+
+    def test_completed_serial_run_with_empty_queue_stops_without_dispatch(self):
+        archive = self.queue_archive([])
+
+        def respond(request, timeout):
+            if request.full_url.endswith("/runs?per_page=100"):
+                return Response(b'{"workflow_runs":[{"status":"completed"}]}')
+            if request.full_url.endswith("/artifacts?per_page=100"):
+                return Response(json.dumps({"artifacts": [{
+                    "name": "pdf-render-queue", "expired": False,
+                    "archive_download_url": "https://api.github.com/archive.zip",
+                }]}).encode())
+            return Response(archive)
+
+        with patch.object(controller, "urlopen", side_effect=respond) as open_url:
+            self.assertFalse(controller.dispatch("anftm/pipeline", "token", "123"))
+            self.assertEqual(open_url.call_count, 3)
 
     def test_errors_or_missing_credentials_cannot_start_another_batch(self):
         with patch.object(controller, "urlopen") as open_url:
@@ -71,6 +116,8 @@ class DispatchPdfRenderTests(unittest.TestCase):
         self.assertEqual(controller_workflow[True]["workflow_run"]["types"], ["completed"])
         self.assertEqual(controller_workflow[True]["workflow_run"]["workflows"], ["Render PDF OCR Inputs"])
         self.assertIn("display_title == 'Serial large PDF render'", controller_workflow["jobs"]["dispatch"]["if"])
+        self.assertIn("conclusion == 'failure'", controller_workflow["jobs"]["dispatch"]["if"])
+        self.assertIn("SOURCE_RUN", controller_workflow["jobs"]["dispatch"]["steps"][-1]["env"])
 
 
 if __name__ == "__main__":
