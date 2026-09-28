@@ -42,6 +42,7 @@ RENDER_RANGE_PAGES = 250
 RENDER_RANGE_THRESHOLD = 500
 BUCKET = "hf://buckets/vomebook/pdf-pages"
 SMALL_RENDER_MAX_SOURCE_BYTES = 100 * 1024 * 1024
+MIN_LARGE_RENDER_SHARDS = pdf_render_schedule.MIN_RENDER_SHARDS
 RENDER_SAMPLE_TIMEOUT = 60
 
 
@@ -189,20 +190,46 @@ def same_source(entry, item):
                 and entry.get("reader_assets_path") == item.get("reader_assets_path"))
 
 
-def render_partition_matches(item, partition):
+def balanced_render_partition_threshold(records):
+    """Pick a size boundary that keeps source bytes close between partitions."""
+    values = sorted(
+        (int(item.get("source_bytes") or 0), str(item.get("key") or ""))
+        for item in records if int(item.get("source_bytes") or 0) > 0
+    )
+    if len(values) < 2:
+        return SMALL_RENDER_MAX_SOURCE_BYTES
+    total = sum(size for size, _ in values)
+    prefix = 0
+    candidates = []
+    for index, (size, _key) in enumerate(values[:-1]):
+        prefix += size
+        next_size = values[index + 1][0]
+        if size >= next_size:
+            continue
+        threshold = next_size
+        candidates.append((abs(prefix - (total - prefix)),
+                           abs(threshold - SMALL_RENDER_MAX_SOURCE_BYTES), threshold))
+    if not candidates:
+        return SMALL_RENDER_MAX_SOURCE_BYTES
+    return min(candidates)[2]
+
+
+def render_partition_matches(item, partition, threshold=None):
     if partition == "all":
         return True
     size = int(item.get("source_bytes") or 0)
     if not size:
         return partition == "small"
-    is_small = size < SMALL_RENDER_MAX_SOURCE_BYTES
+    is_small = size < (threshold or SMALL_RENDER_MAX_SOURCE_BYTES)
     return is_small if partition == "small" else not is_small
 
 
-def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False):
+def pending_render(records, rendered, ocr, retry_failed=False, partition="all", force_reprobe=False,
+                   partition_threshold=None):
     pending = []
+    threshold = partition_threshold or balanced_render_partition_threshold(records)
     for item in records:
-        if not render_partition_matches(item, partition):
+        if not render_partition_matches(item, partition, threshold):
             continue
         if force_reprobe:
             pending.append(item)
@@ -225,6 +252,30 @@ def pending_render(records, rendered, ocr, retry_failed=False, partition="all", 
 
 def range_id(start, end):
     return f"{start:06d}-{end:06d}"
+
+
+def split_render_tasks(tasks, minimum_count):
+    """Split the longest missing ranges until a book has enough matrix work."""
+    tasks = list(tasks)
+    total_pages = sum(task["end"] - task["start"] + 1 for task in tasks)
+    target = min(minimum_count, total_pages)
+    while len(tasks) < target:
+        index = max(
+            (index for index, task in enumerate(tasks)
+             if task["end"] > task["start"]),
+            key=lambda index: (tasks[index]["end"] - tasks[index]["start"],
+                               -tasks[index]["start"]),
+            default=None,
+        )
+        if index is None:
+            break
+        task = tasks[index]
+        middle = (task["start"] + task["end"]) // 2
+        tasks[index:index + 1] = [
+            {**task, "end": middle},
+            {**task, "start": middle + 1},
+        ]
+    return tasks
 
 
 def render_ranges(book):
@@ -344,14 +395,18 @@ def plan_render_ranges(queue, progress, force_reprobe=False, target_seconds=None
         size = RENDER_RANGE_PAGES if book["page_count"] > RENDER_RANGE_THRESHOLD else book["page_count"]
         if target_seconds is not None:
             size = pdf_render_schedule.range_size(book.get("_render_cost", {}), target_seconds, size)
-        for start, end in pdf_render_schedule.missing_ranges(book["page_count"], completed, size):
-            tasks.append({**book, "start": start, "end": end})
+        book_tasks = [{**book, "start": start, "end": end}
+                      for start, end in pdf_render_schedule.missing_ranges(book["page_count"], completed, size)]
+        if target_seconds is not None:
+            book_tasks = split_render_tasks(book_tasks, MIN_LARGE_RENDER_SHARDS)
+        tasks.extend(book_tasks)
     if target_seconds is None:
         count = min(256, len(tasks), max(1, math.ceil(sum(t["end"] - t["start"] + 1 for t in tasks) / 500)))
         shards = shared.weighted_shards(tasks, count, weight=lambda t: t["end"] - t["start"] + 1,
                                         order=lambda t: (-(t["end"] - t["start"] + 1), t["key"], t["start"])) if tasks else []
     else:
-        shards = pdf_render_schedule.balance(tasks, target_seconds)
+        shards = pdf_render_schedule.balance(tasks, target_seconds,
+                                             minimum_shards=MIN_LARGE_RENDER_SHARDS)
     return {**queue, "books": books, "saved_ranges": saved,
             **({"target_render_seconds": target_seconds} if target_seconds is not None else {}),
             "shard_count": len(shards), "shard_ids": list(range(len(shards))),
@@ -970,8 +1025,11 @@ def main():
             if args.source_path_prefix:
                 records = [item for item in records
                            if str(item.get("path", "")).startswith(args.source_path_prefix)]
+            partition_threshold = (balanced_render_partition_threshold(records)
+                                  if args.partition != "all" else None)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition,
-                                     force_reprobe=args.force_reprobe)
+                                     force_reprobe=args.force_reprobe,
+                                     partition_threshold=partition_threshold)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]
             estimator = (lambda item, source: estimate_render_cost(item, source, render_progress)) \
@@ -979,6 +1037,8 @@ def main():
             queue = plan_pdf_ocr.plan(selected, native_text_stream=args.native_text_stream,
                                       render_estimator=estimator)
             queue["kind"] = "pdf-render-queue"
+            if partition_threshold is not None:
+                queue["render_partition_threshold"] = partition_threshold
             queue = plan_render_ranges(queue, render_progress, force_reprobe=args.force_reprobe,
                                        target_seconds=args.target_render_seconds)
         else:

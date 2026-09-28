@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: Maximum pending large PDFs inspected
-        default: "100"
+        description: Maximum pending large PDFs inspected (the controller uses one)
+        default: "1"
         type: string
       checkpoint:
         description: Checkpoint in the pending PDF queue
@@ -43,6 +43,10 @@ on:
         description: Re-probe and rebuild the selected source paths
         default: false
         type: boolean
+      continue_queue:
+        description: After a successful book publish, wake the controller for the next book
+        default: false
+        type: boolean
 permissions:
   contents: read
   actions: read
@@ -62,6 +66,7 @@ jobs:
     outputs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
       shard_ids: ${{ steps.plan.outputs.shard_ids }}
+      book_count: ${{ steps.plan.outputs.book_count }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -99,6 +104,7 @@ jobs:
           python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --target-render-seconds 1500 --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "book_count=$(jq -r '.books | length' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         if: inputs.recover_run == ''
         with:
@@ -198,3 +204,24 @@ jobs:
           PAGES_REPO: ${{ secrets.PAGES_REPO }}
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: python scripts/publish_search_reader_index.py
+
+  notify-controller:
+    needs: [plan, publish]
+    if: inputs.continue_queue == true && inputs.recover_run == '' && needs.plan.result == 'success' && needs.plan.outputs.book_count != '0' && needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Wake the serial large-render controller
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test -n "${GH_PAT}"
+          curl --fail-with-body --silent --show-error -X POST \
+            --header "Authorization: Bearer ${GH_PAT}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --header "Content-Type: application/json" \
+            --data '{"ref":"main"}' \
+            "https://api.github.com/repos/${REPO}/actions/workflows/scheduled-pdf-render-inputs.yml/dispatches"

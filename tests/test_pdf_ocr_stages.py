@@ -547,6 +547,34 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(stages.render_partition_matches(large, "large"))
         self.assertTrue(stages.render_partition_matches(small, "all"))
 
+    def test_partition_boundary_balances_source_bytes(self):
+        records = [
+            {"key": "a", "source_bytes": 40 * 1024 ** 2},
+            {"key": "b", "source_bytes": 60 * 1024 ** 2},
+            {"key": "c", "source_bytes": 140 * 1024 ** 2},
+            {"key": "d", "source_bytes": 160 * 1024 ** 2},
+        ]
+        threshold = stages.balanced_render_partition_threshold(records)
+        self.assertEqual(threshold, 160 * 1024 ** 2)
+        self.assertEqual(
+            sum(item["source_bytes"] for item in records
+                if stages.render_partition_matches(item, "small", threshold)),
+            240 * 1024 ** 2,
+        )
+        self.assertEqual(
+            sum(item["source_bytes"] for item in records
+                if stages.render_partition_matches(item, "large", threshold)),
+            160 * 1024 ** 2,
+        )
+
+    def test_large_render_planner_expands_short_book_to_eighteen_shards(self):
+        book = {**self.item(), "source_sha256": "a" * 64, "page_count": 100,
+                "profile": pdf_ocr.asset_profile()}
+        queue = stages.plan_render_ranges({"shards": [{"records": [book]}]}, {},
+                                          target_seconds=1500)
+        self.assertEqual(queue["shard_count"], 18)
+        self.assertEqual(sum(shard["page_count"] for shard in queue["shards"]), 100)
+
     def test_render_workflow_partitions_and_enables_native_text_streams(self):
         root = Path(__file__).resolve().parents[1]
         large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
@@ -750,12 +778,13 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 18)
         self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["target_pages"]["default"], "2000")
 
-    def test_scheduled_render_drains_pending_in_webp_batches(self):
+    def test_scheduled_render_processes_one_book_per_serial_batch(self):
         root = Path(__file__).resolve().parents[1]
         text = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
         workflow = yaml.safe_load(text)
         inputs = workflow[True]["workflow_dispatch"]["inputs"]
-        self.assertEqual(inputs["limit"]["default"], "100")
+        self.assertEqual(inputs["limit"]["default"], "1")
+        self.assertFalse(inputs["continue_queue"]["default"])
         self.assertFalse(inputs["generate_jxl"]["default"])
         self.assertEqual(workflow["env"]["PDF_JXL_ENABLED"], "${{ inputs.generate_jxl == true }}")
         self.assertEqual(workflow["jobs"]["plan"]["steps"][5]["env"]["CHECKPOINT"], "${{ inputs.checkpoint || '0' }}")

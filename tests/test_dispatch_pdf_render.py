@@ -23,7 +23,7 @@ class DispatchPdfRenderTests(unittest.TestCase):
                 self.assertFalse(controller.dispatch("anftm/pipeline", "token"))
                 self.assertEqual(open_url.call_count, 1)
 
-    def test_idle_dispatches_only_unfiltered_default_batch_on_main(self):
+    def test_idle_dispatches_one_book_from_main(self):
         def respond(request, timeout):
             self.assertEqual(timeout, 30)
             self.assertEqual(request.get_header("Authorization"), "Bearer token")
@@ -32,7 +32,8 @@ class DispatchPdfRenderTests(unittest.TestCase):
                 return Response(b'{"workflow_runs":[{"status":"completed"}]}')
             self.assertEqual(request.full_url, "https://api.github.com/repos/anftm/pipeline/actions/workflows/pdf-render-inputs.yml/dispatches")
             self.assertEqual(json.loads(request.data), {"ref": "main", "inputs": {
-                "limit": "100", "checkpoint": "0", "retry_failed": "true"}})
+                "limit": "1", "checkpoint": "0", "retry_failed": "true",
+                "continue_queue": "true"}})
             return Response(b"", status=204)
         with patch.object(controller, "urlopen", side_effect=respond) as open_url:
             self.assertTrue(controller.dispatch("anftm/pipeline", "token"))
@@ -64,6 +65,10 @@ class DispatchPdfRenderTests(unittest.TestCase):
                          "${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}")
         self.assertEqual(renderer[True]["workflow_dispatch"]["inputs"]["render_lane"]["default"], "")
         self.assertIn("scripts/dispatch_pdf_render.py", controller_workflow["jobs"]["dispatch"]["steps"][-1]["run"])
+        self.assertFalse((root / ".github/workflows/scheduled-pdf-render.yml").exists())
+        self.assertIn("continue_queue", renderer[True]["workflow_dispatch"]["inputs"])
+        self.assertIn("notify-controller", renderer["jobs"])
+        self.assertIn("book_count", renderer["jobs"]["plan"]["outputs"])
 
 
 if __name__ == "__main__":

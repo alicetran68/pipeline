@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dispatch one large-PDF render batch only when the workflow is idle."""
+"""Dispatch one large-PDF render book only when the workflow is idle."""
 
 import json
 import os
@@ -25,8 +25,9 @@ def dispatch(repo, token):
     if any(run["status"] in ACTIVE for run in runs):
         print("Large PDF render already pending or active; skipping dispatch.")
         return False
-    body = json.dumps({"ref": "main", "inputs": {"limit": "100", "checkpoint": "0",
-                                                  "retry_failed": "true"}}).encode()
+    body = json.dumps({"ref": "main", "inputs": {"limit": "1", "checkpoint": "0",
+                                                  "retry_failed": "true",
+                                                  "continue_queue": "true"}}).encode()
     request = Request(endpoint + "/dispatches", data=body,
                       headers={**headers, "Content-Type": "application/json"}, method="POST")
     with urlopen(request, timeout=30) as response:
