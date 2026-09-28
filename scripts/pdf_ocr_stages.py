@@ -393,12 +393,15 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     pages = []
     force_image_render = bool(item.get("force_image_render"))
     first, last = item.get("start", 1), item.get("end", probe["page_count"])
-    scan_images = (pdf_ocr.scan_reader_images(source, first, last)
+    image_render = probe["classification"] != "native-text" or force_image_render
+    sizes = pdf_ocr.page_sizes(source, first, last) if image_render else {}
+    scan_images = (pdf_ocr.scan_reader_images(source, first, last, sizes)
                    if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
     page_started = time.perf_counter()
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
             lin_pdf_text.open_pdf(source) if lin_native else nullcontext(None)) as document:
+        prepared = set()
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text" and not force_image_render:
                 text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)
@@ -414,10 +417,16 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 set_page_meta(page, "o", metadata(out, bundle))
                 pages.append(page)
                 continue
+            if (number - first) % 4 == 0:
+                prepared = pdf_ocr.prerender_pages(source, range(number, min(number + 4, last + 1)),
+                                                    Path(temp), sizes)
             native = probe["classification"] == "native-text" or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS
             reader_pixels = scan_images.get(number) if not native and probe["page_chars"][number - 1] == 0 else None
+            render_options = {"prepared": True} if number in prepared else {}
+            if number in sizes:
+                render_options["size"] = sizes[number]
             png, width, height = pdf_ocr.render_page(source, number, Path(temp), reader_pixels,
-                                                     reader_jxl=pdf_ocr.JXL_ENABLED)
+                                                     reader_jxl=pdf_ocr.JXL_ENABLED, **render_options)
             page = {"p": number, "source": "native" if native else "ocr", "width": width, "height": height}
             for field, local, folder in (("i", png, "ocr-input"),
                                          ("w", png.with_suffix(".webp"), "pages")):

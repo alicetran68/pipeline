@@ -455,14 +455,27 @@ def get_ocr_engine(language=None, backend=None):
     return _OCR_ENGINE_INSTANCES[cache_key]
 
 
-def _page_render_dpi(path: Path, page: int) -> int:
+def page_sizes(path: Path, start: int, end: int) -> dict[int, tuple[float, float]]:
+    """Read all page geometries in a render range with one Poppler invocation."""
+    try:
+        info = _run(["pdfinfo", "-f", str(start), "-l", str(end), "-box", str(path)])
+    except RuntimeError:
+        return {}
+    return {int(page): (float(width), float(height)) for page, width, height in re.findall(
+        r"^Page\s+(\d+)\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info, re.MULTILINE)
+        if start <= int(page) <= end}
+
+
+def _page_render_dpi(path: Path, page: int, size: tuple[float, float] | None = None) -> int:
     """Choose a DPI that keeps unusually large PDF pages within the OCR budget."""
     try:
-        info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
-        match = re.search(r"Page(?:\s+\d+)?\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
-        if not match:
-            return OCR_DPI
-        width_points, height_points = (float(value) for value in match.groups())
+        if size is None:
+            info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+            match = re.search(r"Page(?:\s+\d+)?\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+            if not match:
+                return OCR_DPI
+            size = tuple(float(value) for value in match.groups())
+        width_points, height_points = size
         area = width_points * height_points
         if area <= 0:
             return OCR_DPI
@@ -472,7 +485,8 @@ def _page_render_dpi(path: Path, page: int) -> int:
         return OCR_DPI
 
 
-def scan_reader_images(path: Path, start: int, end: int) -> dict[int, tuple[int, int]]:
+def scan_reader_images(path: Path, start: int, end: int,
+                       sizes: dict[int, tuple[float, float]] | None = None) -> dict[int, tuple[int, int]]:
     """Find unambiguous, nearly full-page raster scans and their source pixels."""
     try:
         listing = _run(["pdfimages", "-f", str(start), "-l", str(end), "-list", str(path)])
@@ -502,11 +516,14 @@ def scan_reader_images(path: Path, start: int, end: int) -> dict[int, tuple[int,
         if min(width, height, x_ppi, y_ppi) < 1:
             continue
         try:
-            info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
-            match = re.search(r"Page(?:\s+\d+)? size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
-            if not match:
-                continue
-            page_width, page_height = (float(value) / 72 for value in match.groups())
+            size = (sizes or {}).get(page)
+            if size is None:
+                info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+                match = re.search(r"Page(?:\s+\d+)? size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+                if not match:
+                    continue
+                size = tuple(float(value) for value in match.groups())
+            page_width, page_height = (value / 72 for value in size)
             coverage = (width / x_ppi / page_width, height / y_ppi / page_height)
             if all(0.85 <= value <= 1.1 for value in coverage):
                 result[page] = (width, height)
@@ -531,13 +548,44 @@ def reader_webp_quality(image, full_page_scan: bool) -> int:
                                     and colorful / count <= .03) else WEBP_QUALITY
 
 
+def prerender_pages(path: Path, pages: range, directory: Path,
+                    sizes: dict[int, tuple[float, float]] | None = None) -> set[int]:
+    """Render a short uniform-DPI range; fall back to individual pages on failure."""
+    if len(pages) < 2:
+        return set()
+    dpis = {_page_render_dpi(path, page, (sizes or {}).get(page)) for page in pages}
+    if len(dpis) != 1:
+        return set()
+    prefix = directory / "render-batch"
+    try:
+        _run(["pdftocairo", "-png", "-r", str(dpis.pop()), "-f", str(pages.start),
+              "-l", str(pages.stop - 1), str(path), str(prefix)],
+             timeout=COMMAND_TIMEOUT * len(pages))
+        staged = list(directory.glob("render-batch-*.png"))
+        produced = {int(image.stem.rsplit("-", 1)[1]): image for image in staged}
+        if set(produced) != set(pages) or len(staged) != len(pages):
+            raise RuntimeError("incomplete batch render")
+        for page, image in produced.items():
+            image.replace(directory / f"page-{page:06d}.png")
+        return set(pages)
+    except (RuntimeError, OSError, ValueError):
+        for page in pages:
+            (directory / f"page-{page:06d}.png").unlink(missing_ok=True)
+        return set()
+    finally:
+        for image in directory.glob("render-batch-*.png"):
+            image.unlink(missing_ok=True)
+
+
 def render_page(path: Path, page: int, directory: Path,
-                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False) -> tuple[Path, int, int]:
+                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False,
+                *, prepared: bool = False, size: tuple[float, float] | None = None) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
-    _run([
-        "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
-        "-f", str(page), "-l", str(page), str(path), str(prefix),
-    ], timeout=COMMAND_TIMEOUT)
+    if not prepared:
+        _run([
+            "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page, size)),
+            "-f", str(page), "-l", str(page), str(path), str(prefix),
+        ], timeout=COMMAND_TIMEOUT)
     png = prefix.with_suffix(".png")
     if not png.is_file():
         raise RuntimeError(f"page {page} render missing")

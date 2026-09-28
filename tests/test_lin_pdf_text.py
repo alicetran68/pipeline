@@ -74,7 +74,7 @@ class LinPdfTextTests(unittest.TestCase):
             with patch.object(pdf_ocr, "MIN_NATIVE_PAGE_CHARS", 5):
                 self.assertEqual(lin_pdf_text.probe(repaired)["classification"], "native-text")
 
-            def render(_source, number, directory, reader_pixels=None, reader_jxl=False):
+            def render(_source, number, directory, reader_pixels=None, reader_jxl=False, **_options):
                 image = directory / f"page-{number:06d}.png"
                 with Image.new("RGB", (200, 300), "white") as bitmap:
                     bitmap.save(image)
@@ -82,6 +82,7 @@ class LinPdfTextTests(unittest.TestCase):
                 return image, 200, 300
 
             with patch.object(pdf_ocr, "render_page", side_effect=render), \
+                    patch.object(pdf_ocr, "prerender_pages", return_value=set()), \
                     patch.object(pdf_ocr, "scan_reader_images", return_value={}), \
                     patch.object(pdf_ocr, "MIN_NATIVE_PAGE_CHARS", 5), \
                     patch.object(pdf_ocr, "JXL_ENABLED", False):
