@@ -100,6 +100,24 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertEqual(reader.size, webp.size)
                 self.assertEqual(reader.height, 1800)
 
+    def test_page_render_dpi_honors_numbered_pdfinfo_page_size(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "large-page.pdf"
+            with Image.new("RGB", (800, 1100), "white") as image:
+                image.save(source, "PDF", resolution=150)
+            with patch.object(pdf_ocr, "MAX_PAGE_PIXELS", 100000):
+                dpi = pdf_ocr._page_render_dpi(source, 1)
+                self.assertLess(dpi, pdf_ocr.OCR_DPI)
+                png, width, height = pdf_ocr.render_page(source, 1, root)
+            self.assertLessEqual(width * height, 100000)
+            with Image.open(png) as rendered:
+                self.assertEqual(rendered.size, (width, height))
+
+    def test_page_render_dpi_can_drop_below_24_for_very_large_pages(self):
+        with patch.object(pdf_ocr, "_run", return_value="Page 3501 size: 100000 x 100000 pts"):
+            self.assertLess(pdf_ocr._page_render_dpi(Path("large.pdf"), 3501), 24)
+
     def test_reader_quality_uses_clean_scan_only_with_or_without_jxl(self):
         with Image.new("RGB", (128, 128), "white") as clean, \
                 Image.new("RGB", (128, 128), (196, 166, 115)) as yellowed, \

@@ -459,7 +459,7 @@ def _page_render_dpi(path: Path, page: int) -> int:
     """Choose a DPI that keeps unusually large PDF pages within the OCR budget."""
     try:
         info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
-        match = re.search(r"Page size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+        match = re.search(r"Page(?:\s+\d+)?\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
         if not match:
             return OCR_DPI
         width_points, height_points = (float(value) for value in match.groups())
@@ -467,7 +467,7 @@ def _page_render_dpi(path: Path, page: int) -> int:
         if area <= 0:
             return OCR_DPI
         max_dpi = int(72 * (MAX_PAGE_PIXELS / area) ** 0.5)
-        return max(24, min(OCR_DPI, max_dpi))
+        return max(1, min(OCR_DPI, max_dpi))
     except Exception:
         return OCR_DPI
 
