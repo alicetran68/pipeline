@@ -35,6 +35,10 @@ on:
         description: Source path prefix filter, or blank for all
         default: ""
         type: string
+      render_lane:
+        description: Independent lane for a single manually scoped source (blank keeps the shared queue)
+        default: ""
+        type: string
       force_reprobe:
         description: Re-probe and rebuild the selected source paths
         default: false
@@ -44,7 +48,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: pdf-render-inputs
+  group: ${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}
   cancel-in-progress: false
   queue: max
 
@@ -81,10 +85,14 @@ jobs:
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
           SOURCE_REPO: ${{ inputs.source_repo || '' }}
           SOURCE_PATH_PREFIX: ${{ inputs.source_path_prefix || '' }}
+          RENDER_LANE: ${{ inputs.render_lane || '' }}
           FORCE_REPROBE: ${{ inputs.force_reprobe || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINT" =~ ^[0-9]+$ ]] || exit 1
+          if [[ -n "$RENDER_LANE" ]]; then
+            [[ "$RENDER_LANE" =~ ^[a-z0-9-]{1,32}$ ]] && [[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]] || exit 1
+          fi
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
           if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi

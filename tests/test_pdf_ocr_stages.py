@@ -552,6 +552,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
         small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
         self.assertIn("plan-render --partition large --native-text-stream", large)
+        self.assertIn("inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs'", large)
+        self.assertIn('[[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]]', large)
         self.assertIn("plan-render --partition small --native-text-stream", small)
         self.assertIn("--source-repo", small)
         self.assertIn("--source-path-prefix", small)

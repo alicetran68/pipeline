@@ -60,7 +60,9 @@ class DispatchPdfRenderTests(unittest.TestCase):
         self.assertIn("schedule", controller_workflow[True])
         self.assertNotIn("schedule", renderer[True])
         self.assertEqual(controller_workflow["concurrency"]["queue"], "max")
-        self.assertEqual(renderer["concurrency"]["group"], "pdf-render-inputs")
+        self.assertEqual(renderer["concurrency"]["group"],
+                         "${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}")
+        self.assertEqual(renderer[True]["workflow_dispatch"]["inputs"]["render_lane"]["default"], "")
         self.assertIn("scripts/dispatch_pdf_render.py", controller_workflow["jobs"]["dispatch"]["steps"][-1]["run"])
 
 

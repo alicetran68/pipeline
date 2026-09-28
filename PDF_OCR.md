@@ -7,6 +7,8 @@ workflow completion and can be dispatched independently to drain its backlog.
 large render workflow from the current `main` only when no render run is pending,
 queued or active. This includes the existing older long-running batches; the
 controller never cancels or replaces them. Manual renders remain available.
+Manually scoped sources can select distinct `render_lane` values to run builds
+independently; every publish job still uses the `reader-assets` lock.
 The existing large-PDF WebP worker is not the supplier of OCR images: its
 100 MiB policy and lossy delivery images are unsuitable for that purpose.
 The image OCR concurrency group is `pdf-image-ocr-assets`; legacy monolithic
