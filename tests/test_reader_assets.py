@@ -321,7 +321,7 @@ class ScannerTests(unittest.TestCase):
             def build(epub, target):
                 calls.append(epub)
                 if epub == source:
-                    raise convert_reader_assets.ET.ParseError("junk after document element")
+                    raise convert_reader_assets.zipfile.BadZipFile("broken central directory")
                 target.mkdir(parents=True, exist_ok=True)
                 (target / "chapter-manifest.json").write_text("{}", encoding="utf-8")
                 return {"chapters": []}

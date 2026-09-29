@@ -206,7 +206,7 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     for entry in entries:
         record = by_source.get(entry["source_path"])
         if record is None:
-            raise ValueError(f'EPUB TOC target is outside readable spine: {entry["source_path"]}')
+            continue
         if entry["source_path"] not in documents:
             try:
                 documents[entry["source_path"]] = ET.fromstring(record["clean"])
@@ -502,7 +502,8 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
     search_target = output / "epub-search-index.json.gz"
     search_target.write_bytes(search_bytes)
     result = {"version": 1, "kind": "epub-chapters", "chapters": chapters, "search_index": {"path": search_target.relative_to(output).as_posix(), "bytes": len(search_bytes), "sha256": hashlib.sha256(search_bytes).hexdigest()}}
-    result["toc"] = toc
+    if toc:
+        result["toc"] = toc
     if fallback:
         result["fallback"] = fallback
     validate_chapter_manifest(result)

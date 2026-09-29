@@ -1383,10 +1383,10 @@ def build_epub_chapter_bundle(chapter_source: Path, output: Path, extension: str
 
     try:
         return epub_chapters.build_bundle(chapter_source, output)
-    except ET.ParseError as original_error:
+    except (ET.ParseError, zipfile.BadZipFile) as original_error:
         if extension != "epub":
             raise
-        print(f"warning: original EPUB XML is malformed; retrying chapter extraction after Calibre repack: {original_error}")
+        print(f"warning: original EPUB package is malformed; retrying chapter extraction after Calibre repack: {original_error}")
         repaired = work / "chapter-source-repaired.epub"
         run_checked(
             ["ebook-convert", str(chapter_source), str(repaired), "--flow-size", "0"],
@@ -1398,7 +1398,7 @@ def build_epub_chapter_bundle(chapter_source: Path, output: Path, extension: str
             return epub_chapters.build_bundle(repaired, output)
         except Exception as repair_error:
             raise RuntimeError(
-                f"original EPUB XML was malformed ({original_error}); "
+                f"original EPUB package was malformed ({original_error}); "
                 f"Calibre repair did not produce a chapter bundle ({repair_error})"
             ) from repair_error
 
