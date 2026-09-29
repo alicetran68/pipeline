@@ -1,0 +1,49 @@
+name: Schedule Reader Assets
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Build Reader Assets]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: reader-assets-controller
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  dispatch:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch Reader Assets only when idle
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          endpoint="https://api.github.com/repos/${REPO}/actions/workflows/reader-assets.yml"
+          runs=$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${endpoint}/runs?per_page=20")
+          active=$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested")] | length' <<<"${runs}")
+          if ((active > 0)); then
+            echo "Reader Assets worker already active; no pending run will be created."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error -X POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --header "Content-Type: application/json" \
+            --data '{"ref":"main"}' \
+            "${endpoint}/dispatches"

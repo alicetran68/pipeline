@@ -8,7 +8,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 try:
@@ -16,14 +16,14 @@ try:
     from .pdf_range_state import remote_state
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
-        reusable_object_key, validate_manifest, validate_object_path,
+        READER_EBOOK_BUCKET_PATH_RE, reusable_object_key, validate_manifest, validate_object_path,
     )
 except ImportError:
     from build_reader_assets_index import encode_index
     from pdf_range_state import remote_state
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
-        reusable_object_key, validate_manifest, validate_object_path,
+        READER_EBOOK_BUCKET_PATH_RE, reusable_object_key, validate_manifest, validate_object_path,
     )
 
 try:
@@ -32,6 +32,7 @@ except ImportError:
     import shared
 
 SIDECAR_NAME = "reader_assets.json.gz"
+PDF_PAGES_BUCKET = "vomebook/pdf-pages"
 
 
 def bundle_is_published(manifest: dict, data: dict) -> bool:
@@ -45,8 +46,13 @@ def bundle_is_published(manifest: dict, data: dict) -> bool:
         if result.get("status") == "ready":
             for field in ("source_revision", "source_sha256", "source_extension", "profile",
                           "reader_mode", "path", "bytes", "sha256", "chapter_manifest",
-                          "chapter_bundle_profile", "chapter_bundle_error", "fallback_path"):
-                if current.get(field) != result.get(field):
+                          "chapter_bucket", "chapter_bundle_profile", "chapter_bundle_error", "fallback_path"):
+                expected = result.get(field)
+                if field == "chapter_manifest" and expected:
+                    expected = f"ebook-chapters/{expected}"
+                if field == "chapter_bucket" and result.get("chapter_manifest"):
+                    expected = PDF_PAGES_BUCKET
+                if current.get(field) != expected:
                     return False
         elif current.get("error") != result.get("error"):
             return False
@@ -133,6 +139,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
             )
             reusable[identity] = candidate
     artifacts = {}
+    bucket_artifacts = {}
     for result in data["results"]:
         entry = {key: value for key, value in result.items() if key != "key"}
         if result.get("status") == "ready":
@@ -156,16 +163,20 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                 if file_sha256(artifact) != result["sha256"]:
                     raise ValueError(f"artifact digest mismatch for {result['key']}")
                 artifacts[result["path"]] = str(artifact)
-                if result.get("chapter_manifest"):
-                    prefix = Path(result["chapter_manifest"]).parent
-                    root = bundle / prefix
-                    if not root.is_dir():
-                        raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
-                    for child in sorted(root.rglob("*")):
-                        if child.is_file():
-                            path = (prefix / child.relative_to(root)).as_posix()
-                            validate_object_path(path)
-                            artifacts[path] = str(child)
+            if result.get("chapter_manifest"):
+                prefix = Path(result["chapter_manifest"]).parent
+                root = bundle / prefix
+                if not root.is_dir():
+                    raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
+                for child in sorted(root.rglob("*")):
+                    if child.is_file():
+                        relative = (prefix / child.relative_to(root)).as_posix()
+                        path = f"ebook-chapters/{relative}"
+                        if not READER_EBOOK_BUCKET_PATH_RE.fullmatch(path):
+                            raise ValueError("invalid EPUB chapter Bucket path")
+                        bucket_artifacts[path] = str(child)
+                entry["chapter_manifest"] = f"ebook-chapters/{result['chapter_manifest']}"
+                entry["chapter_bucket"] = PDF_PAGES_BUCKET
         elif result.get("status") != "failed":
             raise ValueError("unknown reader asset result status")
         elif files.get(result["key"], {}).get("status") == "ready":
@@ -219,6 +230,16 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
         CommitOperationAdd(path_in_repo=path, path_or_fileobj=source)
         for path, source in sorted(artifacts.items())
     ]
+    if bucket_artifacts:
+        for path, source in bucket_artifacts.items():
+            local = bundle / path
+            local.parent.mkdir(parents=True, exist_ok=True)
+            if not local.exists():
+                try:
+                    os.link(source, local)
+                except OSError:
+                    import shutil
+                    shutil.copyfile(source, local)
     operations.append(CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=canonical_json(updated, pretty=True)))
     operations.append(CommitOperationAdd(
         path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest, range_manifest, ocr_manifest)))
@@ -230,6 +251,7 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
     result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
     baseline = None
     objects_uploaded = False
+    bucket_uploaded = False
     for attempt in range(max_attempts):
         try:
             revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
@@ -245,11 +267,18 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                 api.upload_folder(
                     repo_id=repo_id, folder_path=bundle, repo_type="dataset",
                     allow_patterns="objects/**", commit_message="Upload Reader Asset objects",
+                    ignore_patterns=["objects/**/epub-chapters/**"],
                 )
                 revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
                 objects_uploaded = True
             range_manifest = remote_state(api, repo_id, revision)
             manifest, operations = build_publish(api, repo_id, bundle, revision, range_manifest)
+            bucket_root = bundle / "ebook-chapters"
+            if not bucket_uploaded and bucket_root.is_dir():
+                sync_bucket(str(bucket_root), f"hf://buckets/{PDF_PAGES_BUCKET}/ebook-chapters",
+                            token=os.environ.get("HF_TOKEN"), quiet=True)
+                bucket_uploaded = True
+                revision = api.repo_info(repo_id=repo_id, repo_type="dataset").sha
             operations = [operation for operation in operations
                           if operation.path_in_repo in {MANIFEST_NAME, SIDECAR_NAME}]
             api.create_commit(

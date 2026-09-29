@@ -33,6 +33,8 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest
             compact.update({"m": MODE[entry["reader_mode"]], "p": entry["path"]})
             if entry.get("chapter_manifest"):
                 compact["c"] = entry["chapter_manifest"]
+                if entry.get("chapter_bucket"):
+                    compact["cb"] = entry["chapter_bucket"]
             if entry.get("fallback_path"):
                 compact["f"] = entry["fallback_path"]
         files[key] = compact

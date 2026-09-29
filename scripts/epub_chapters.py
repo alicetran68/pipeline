@@ -8,6 +8,7 @@ import json
 import posixpath
 import re
 import zipfile
+import copy
 from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -16,6 +17,11 @@ from html.parser import HTMLParser
 
 MAX_CHAPTER_RESOURCES = 2000
 MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
+TARGET_CHAPTER_BYTES = 1024 * 1024
+MAX_CHAPTER_BYTES = 8 * 1024 * 1024
+MAX_CHAPTERS = 10000
+MAX_SEARCH_INDEX_TEXT_BYTES = 256 * 1024 * 1024
+MAX_SEARCH_INDEX_PACKED_BYTES = 64 * 1024 * 1024
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
@@ -250,6 +256,52 @@ def _chapter_text(document: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
 
 
+def _split_spine_record(record: dict) -> list[dict]:
+    """Split oversized spine documents at top-level XHTML elements."""
+    root = ET.fromstring(record["clean"])
+    body = next((node for node in root.iter() if _local_name(node) == "body"), None)
+    if body is None:
+        raise ValueError("EPUB chapter has no body")
+    children = list(body)
+    if not children:
+        if len(record["clean"].encode("utf-8")) > MAX_CHAPTER_BYTES:
+            raise ValueError("EPUB chapter exceeds the Reader chapter limit")
+        return [record]
+    chunks = []
+    current = []
+    wrapper = copy.deepcopy(root)
+    wrapper_body = next(node for node in wrapper.iter() if _local_name(node) == "body")
+    for node in list(wrapper_body):
+        wrapper_body.remove(node)
+    wrapper_bytes = len(ET.tostring(wrapper, encoding="utf-8"))
+    current_bytes = 0
+    for child in children:
+        child_bytes = len(ET.tostring(child, encoding="utf-8"))
+        if current and wrapper_bytes + current_bytes + child_bytes > TARGET_CHAPTER_BYTES:
+            chunks.append(current)
+            current = [child]
+            current_bytes = child_bytes
+        else:
+            current.append(child)
+            current_bytes += child_bytes
+    if current:
+        chunks.append(current)
+    output = []
+    for chunk in chunks:
+        part = copy.deepcopy(root)
+        part_body = next(node for node in part.iter() if _local_name(node) == "body")
+        for node in list(part_body):
+            part_body.remove(node)
+        for node in chunk:
+            part_body.append(copy.deepcopy(node))
+        clean = ET.tostring(part, encoding="unicode", method="xml")
+        size = len(clean.encode("utf-8"))
+        if size > MAX_CHAPTER_BYTES:
+            raise ValueError("single EPUB spine element exceeds the Reader chapter limit")
+        output.append({**record, "clean": clean})
+    return output
+
+
 def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                  include_resources: bool = True) -> dict:
     """Write chapter files and return the validated manifest.
@@ -272,6 +324,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 manifest[node.attrib.get("id", "")] = node.attrib
         chapters = []
         search_chapters = []
+        search_text_bytes = 0
         chapter_records = []
         resource_usage = Counter()
         toc_entries = _toc_entries(archive, opf_path, manifest, names)
@@ -316,6 +369,21 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
+        split_records = []
+        for record in chapter_records:
+            safe_resources = {_safe_resource_path(resource): resource for resource in record["resources"]}
+            for split in _split_spine_record(record):
+                split["resources"] = {
+                    resource for safe, resource in safe_resources.items()
+                    if f"../resources/__CHAPTER_RESOURCE__/{safe}" in split["clean"]
+                }
+                split_records.append(split)
+        if len(split_records) > MAX_CHAPTERS:
+            raise ValueError("EPUB chapter count exceeds Reader limit")
+        chapter_records = split_records
+        resource_usage = Counter(resource for record in chapter_records for resource in record["resources"])
+        for index, record in enumerate(chapter_records, 1):
+            record["index"] = index
         toc = bundle_toc(toc_entries, chapter_records)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
@@ -366,9 +434,17 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             target.write_text(clean, encoding="utf-8")
             data = target.read_bytes()
             chapters.append({"index": chapter_index, "title": record["title"], "source_path": record["source_path"], "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-            search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": _chapter_text(clean)})
+            chapter_text = _chapter_text(clean)
+            search_text_bytes += len(chapter_text.encode("utf-8"))
+            if search_text_bytes > MAX_SEARCH_INDEX_TEXT_BYTES:
+                raise ValueError("EPUB full-text index exceeds Reader limit")
+            search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": chapter_text})
     search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
+    if len(search_data) > MAX_SEARCH_INDEX_TEXT_BYTES:
+        raise ValueError("EPUB full-text index exceeds Reader limit")
     search_bytes = gzip.compress(search_data, mtime=0)
+    if len(search_bytes) > MAX_SEARCH_INDEX_PACKED_BYTES:
+        raise ValueError("EPUB compressed search index exceeds Reader limit")
     search_target = output / "epub-search-index.json.gz"
     search_target.write_bytes(search_bytes)
     result = {"version": 1, "kind": "epub-chapters", "chapters": chapters, "search_index": {"path": search_target.relative_to(output).as_posix(), "bytes": len(search_bytes), "sha256": hashlib.sha256(search_bytes).hexdigest()}}

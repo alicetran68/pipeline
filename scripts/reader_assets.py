@@ -11,6 +11,14 @@ from pathlib import Path
 MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
+READER_EBOOK_BUCKET = "vomebook/pdf-pages"
+READER_EBOOK_BUCKET_PATH_RE = re.compile(
+    r"^ebook-chapters/objects/[0-9a-f]{2}/[0-9a-f]{64}/"
+    r"(?:[a-z0-9-]+/){2}epub-chapters/"
+    r"(?:chapter-manifest\.json|chapters/chapter-[0-9]{4}\.xhtml|"
+    r"resources/(?!\.{1,2}(?:/|$))[^/]+(?:/(?!\.{1,2}(?:/|$))[^/]+)*|"
+    r"epub-search-index\.json\.gz)$"
+)
 MANIFEST_NAME = "manifest.json"
 # Chapter manifests make multi-file books cheap to open: the Reader fetches the
 # manifest and nearby chapters instead of downloading the complete archive.
@@ -18,7 +26,7 @@ MANIFEST_NAME = "manifest.json"
 EPUB_CHAPTER_SPLIT_BYTES = 8 * 1024 * 1024
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
-EPUB_CHAPTER_PROFILE = "epub-chapters-v6"
+EPUB_CHAPTER_PROFILE = "epub-chapters-v7-bucket"
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
     "docx": ("docx-native-v2", "docx", "document.docx"),
@@ -114,11 +122,10 @@ def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
 
 
 def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> bool:
-    """Whether a large book should receive an independently fetched chapter bundle."""
+    """Whether an ebook should receive an independently fetched chapter bundle."""
     # CHM navigation includes groups and repeated fragment targets. The flat
     # chapter bundle cannot represent that tree; keep its repaired native EPUB.
-    return (extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
-            and int(source_bytes or 0) >= EPUB_CHAPTER_SPLIT_BYTES)
+    return extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
 
 
 def source_password(repo: str, path: str) -> str:
@@ -156,7 +163,8 @@ def validate_chapter_manifest(manifest: dict) -> dict:
     if not isinstance(manifest, dict) or manifest.get("version") != CHAPTER_MANIFEST_VERSION:
         raise ValueError("unsupported EPUB chapter manifest version")
     chapters = manifest.get("chapters")
-    if manifest.get("kind") != "epub-chapters" or not isinstance(chapters, list) or not chapters:
+    if (manifest.get("kind") != "epub-chapters" or not isinstance(chapters, list)
+            or not chapters or len(chapters) > 10000):
         raise ValueError("invalid EPUB chapter manifest")
     seen = set()
     for index, chapter in enumerate(chapters, 1):
@@ -228,10 +236,15 @@ def validate_manifest(manifest: dict) -> dict:
         if status == "ready":
             validate_object_path(entry.get("path"))
             for field in ("chapter_manifest", "fallback_path"):
-                if field in entry:
+                if field in entry and not (field == "chapter_manifest" and entry.get("chapter_bucket")):
                     validate_object_path(entry[field])
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
                 raise ValueError("invalid chapter manifest path")
+            if entry.get("chapter_bucket") not in (None, "vomebook/pdf-pages"):
+                raise ValueError("invalid chapter bucket")
+            if entry.get("chapter_bucket") and not READER_EBOOK_BUCKET_PATH_RE.fullmatch(
+                    entry.get("chapter_manifest", "")):
+                raise ValueError("invalid bucket chapter manifest path")
             if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "foliate", "pdf"}:
                 raise ValueError("chapter manifest requires EPUB or PDF reader mode")
             if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "audio", "video"}:
