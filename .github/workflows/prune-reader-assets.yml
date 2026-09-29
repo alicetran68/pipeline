@@ -28,7 +28,7 @@ on:
       bucket_grace_days:
         description: Days an unreferenced PDF Bucket root must remain before deletion
         required: true
-        default: "30"
+        default: "7"
         type: string
 
 concurrency:
@@ -53,12 +53,12 @@ jobs:
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/prune_reader_assets.py "${args[@]}"
       - name: Report and optionally prune unreferenced PDF Bucket roots
-        if: github.event_name == 'workflow_dispatch' || vars.PDF_BUCKET_GC_REPORT == 'true'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || vars.PDF_BUCKET_GC_REPORT == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--grace-days "${{ inputs.bucket_grace_days || '30' }}" --limit "${{ inputs.limit || '1000' }}")
-          if { [[ "${{ github.event_name }}" == "schedule" ]] && [[ "${{ vars.PDF_BUCKET_GC_APPLY }}" == "true" ]]; } || \
+          args=(--grace-days "${{ inputs.bucket_grace_days || '7' }}" --limit "${{ inputs.limit || '1000' }}")
+          if { [[ "${{ github.event_name }}" == "schedule" ]]; } || \
              { [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && [[ "${{ inputs.bucket_apply }}" == "true" ]]; }; then
             args+=(--apply --allow-unreferenced)
           fi

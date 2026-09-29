@@ -265,7 +265,14 @@ def delete_roots(roots: list[str], token: str) -> None:
     with tempfile.TemporaryDirectory(prefix="pdf-bucket-gc-") as empty:
         for root in roots:
             api.sync_bucket(empty, f"hf://buckets/{BUCKET}/{root}", delete=True,
-                            token=token, quiet=True)
+                             token=token, quiet=True)
+
+
+def recheck_unreferenced(api: HfApi, repo: str, roots: list[str], token: str) -> list[str]:
+    """Re-read protections immediately before deletion to narrow manifest races."""
+    revision = api.repo_info(repo_id=repo, repo_type="dataset").sha
+    protected = load_protection(api, repo, revision)
+    return [root for root in roots if root not in protected]
 
 
 def parse_args():
@@ -300,6 +307,11 @@ def main() -> int:
     for path in paths:
         print(path)
     if args.apply and paths:
+        paths = recheck_unreferenced(api, args.assets_repo, paths, token)
+        if not paths:
+            print("all deletion candidates became protected during final recheck")
+            save_state(api, args.assets_repo, state)
+            return 0
         delete_roots(paths, token)
         for path in paths:
             state["candidates"].pop(path, None)
