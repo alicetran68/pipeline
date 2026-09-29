@@ -173,6 +173,14 @@ def validate_storage_path(path: str) -> str:
     return validate_object_path(path)
 
 
+def validate_chapter_manifest_path(path: str) -> str:
+    """Accept chapter manifests stored under the legacy ebook-chapters prefix."""
+    if isinstance(path, str) and path.startswith("ebook-chapters/"):
+        validate_object_path(path[len("ebook-chapters/"):])
+        return path
+    return validate_object_path(path)
+
+
 def validate_chapter_manifest(manifest: dict) -> dict:
     if not isinstance(manifest, dict) or manifest.get("version") != CHAPTER_MANIFEST_VERSION:
         raise ValueError("unsupported EPUB chapter manifest version")
@@ -274,9 +282,10 @@ def validate_manifest(manifest: dict) -> dict:
             raise ValueError("reader manifest file entry has invalid status")
         if status == "ready":
             validate_storage_path(entry.get("path"))
-            for field in ("chapter_manifest", "fallback_path"):
-                if field in entry:
-                    validate_object_path(entry[field])
+            if "chapter_manifest" in entry:
+                validate_chapter_manifest_path(entry["chapter_manifest"])
+            if "fallback_path" in entry:
+                validate_object_path(entry["fallback_path"])
             if entry.get("chapter_bucket") not in {None, "vomebook/pdf-pages"}:
                 raise ValueError("invalid chapter bucket")
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):

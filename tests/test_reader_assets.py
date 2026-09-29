@@ -101,10 +101,22 @@ class ReaderAssetContractTests(unittest.TestCase):
         manifest = reader_assets.empty_manifest()
         manifest["files"]["repo\\0book.epub"] = {
             "status": "ready", "path": "objects/a/document.pdf",
-            "chapter_manifest": "objects/a/chapter-manifest.json",
+            "chapter_manifest": "ebook-chapters/objects/a/chapter-manifest.json",
             "fallback_path": "objects/a/document.pdf", "reader_mode": "pdf",
         }
         self.assertIs(reader_assets.validate_manifest(manifest), manifest)
+
+    def test_chapter_manifest_legacy_prefix_still_rejects_unsafe_paths(self):
+        for path in (
+                "ebook-chapters/objects/../outside/chapter-manifest.json",
+                "ebook-chapters/objects\\outside/chapter-manifest.json",
+                "ebook-chapters//objects/a/chapter-manifest.json"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "object path"):
+                reader_assets.validate_manifest({
+                    "version": 1,
+                    "files": {"key": {"status": "ready", "path": "objects/a/document.epub",
+                                       "reader_mode": "foliate", "chapter_manifest": path}},
+                })
 
     def test_passwords_require_an_explicit_marker_or_known_source(self):
         self.assertEqual(reader_assets.source_password("repo", "资料〔密码：123〕.docx"), "123")
