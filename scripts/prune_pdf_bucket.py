@@ -38,6 +38,7 @@ REGISTRY_FILES = (
     "pdf_range_manifest.json",
 )
 SIDECAR_NAME = "reader_assets.json.gz"
+OCR_PROGRESS_PREFIX = "pdf_ocr_progress_v3"
 STATE_NAME = "pdf_bucket_gc_state.json"
 SHARD_PREFIXES = [f"{OBJECT_PREFIX}/{index:02x}" for index in range(256)]
 
@@ -98,10 +99,34 @@ def load_optional_sidecar(api: HfApi, repo: str, revision: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def load_progress_protection(api: HfApi, repo: str, revision: str) -> set[str]:
+    """Protect immutable OCR objects referenced by resumable v3 progress."""
+    try:
+        entries = api.list_repo_tree(repo_id=repo, path_in_repo=OCR_PROGRESS_PREFIX,
+                                     recursive=True, revision=revision,
+                                     repo_type="dataset", token=api.token)
+    except HfHubHTTPError as exc:
+        if getattr(exc.response, "status_code", None) == 404:
+            return set()
+        raise
+    roots: set[str] = set()
+    for entry in entries:
+        path = str(getattr(entry, "path", ""))
+        if not path.endswith("/index.json"):
+            continue
+        local = hf_hub_download(repo_id=repo, repo_type="dataset", filename=path,
+                                revision=revision, token=api.token)
+        data = json.loads(Path(local).read_text(encoding="utf-8"))
+        roots.update(referenced_roots(data))
+    return roots
+
+
 def load_protection(api: HfApi, repo: str, revision: str) -> set[str]:
     values = [load_optional_json(api, repo, name, revision) for name in REGISTRY_FILES]
     values.append(load_optional_sidecar(api, repo, revision))
-    return referenced_roots(*values)
+    roots = referenced_roots(*values)
+    roots.update(load_progress_protection(api, repo, revision))
+    return roots
 
 
 def empty_state() -> dict:

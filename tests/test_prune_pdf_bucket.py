@@ -19,6 +19,17 @@ class PdfBucketGcTests(unittest.TestCase):
                                     {"pages": [{"o": second + "/ocr/page-000001.json.gz"}]})
         self.assertEqual(roots, {first, second})
 
+    def test_progress_indexes_protect_ocr_objects(self):
+        root = "objects/cc/" + "e" * 64 + "/" + "f" * 16
+        entry = type("Entry", (), {"path": "pdf_ocr_progress_v3/aa/index.json"})()
+        api = gc.HfApi()
+        api.token = "token"
+        with patch.object(api, "list_repo_tree", return_value=[entry]), \
+             patch.object(gc, "hf_hub_download", return_value="/tmp/progress.json") as download, \
+             patch("pathlib.Path.read_text", return_value='{"pages":{"1":{"o":"' + root + '/ocr/page.json"}}}'):
+            self.assertEqual(gc.load_progress_protection(api, "assets", "rev"), {root})
+        download.assert_called_once()
+
     def test_eligible_roots_keeps_referenced_recent_and_unknown_dates(self):
         old = datetime(2026, 1, 1, tzinfo=timezone.utc)
         recent = datetime(2026, 9, 25, tzinfo=timezone.utc)
