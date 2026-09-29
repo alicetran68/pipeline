@@ -25,6 +25,11 @@ from scripts import epub_chapters, reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
+    def test_reader_assets_controller_counts_pending_workers(self):
+        workflow = (Path(__file__).resolve().parents[1]
+                    / ".github/workflows/scheduled-reader-assets.yml").read_text(encoding="utf-8")
+        self.assertIn('select(.status == "queued" or .status == "pending"', workflow)
+
     def test_bigram_filter_vector_matches_reader_worker_encoding(self):
         encoded = base64.b64encode(epub_chapters._bigram_filter("读手机书")).decode("ascii")
         self.assertEqual(encoded, "CP0BAEAAAAAgAgIAEAAAAIRAAAAAAACAIAgAAAABAAA=")

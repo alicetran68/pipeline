@@ -35,7 +35,7 @@ jobs:
             --header "Accept: application/vnd.github+json" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "${endpoint}/runs?per_page=20")
-          active=$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested")] | length' <<<"${runs}")
+          active=$(jq '[.workflow_runs[] | select(.status == "queued" or .status == "pending" or .status == "in_progress" or .status == "waiting" or .status == "requested")] | length' <<<"${runs}")
           if ((active > 0)); then
             echo "Reader Assets worker already active; no pending run will be created."
             exit 0
