@@ -2,6 +2,7 @@
 """Build a sanitized, independently fetchable EPUB chapter bundle."""
 
 import hashlib
+import base64
 import gzip
 import html
 import json
@@ -22,6 +23,38 @@ MAX_CHAPTER_BYTES = 8 * 1024 * 1024
 MAX_CHAPTERS = 10000
 MAX_SEARCH_INDEX_TEXT_BYTES = 256 * 1024 * 1024
 MAX_SEARCH_INDEX_PACKED_BYTES = 64 * 1024 * 1024
+MAX_SEARCH_BIGRAM_FILTER_BYTES = 8 * 1024 * 1024
+MAX_CHAPTER_BIGRAM_FILTER_BYTES = 32 * 1024
+BIGRAM_FILTER_HASHES = 7
+MAX_BIGRAM_FILTER_GRAMS = (MAX_CHAPTER_BIGRAM_FILTER_BYTES * 8) // 10
+
+
+def _bigram_filter(text: str) -> bytes | None:
+    """Build a bounded Bloom filter over exact two-codepoint substrings."""
+    grams = set()
+    for gram in zip(text, text[1:]):
+        grams.add(gram)
+        if len(grams) > MAX_BIGRAM_FILTER_GRAMS:
+            return None
+    if not grams:
+        return None
+    bit_count = 1 << max(8, (len(grams) * 10 - 1).bit_length())
+    if bit_count > MAX_CHAPTER_BIGRAM_FILTER_BYTES * 8:
+        return None
+    bits = bytearray(bit_count // 8)
+    mask = bit_count - 1
+    for first, second in grams:
+        h1, h2 = 2166136261, 0x9E3779B9
+        for char in (first, second):
+            codepoint = ord(char)
+            h1 = ((h1 ^ codepoint) * 16777619) & 0xFFFFFFFF
+            h2 ^= (codepoint + 0x9E3779B9 + ((h2 << 6) & 0xFFFFFFFF) + (h2 >> 2)) & 0xFFFFFFFF
+            h2 &= 0xFFFFFFFF
+        h2 |= 1
+        for probe in range(BIGRAM_FILTER_HASHES):
+            bit = (h1 + probe * h2) & mask
+            bits[bit >> 3] |= 1 << (bit & 7)
+    return bytes(bits)
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
@@ -438,8 +471,29 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             search_text_bytes += len(chapter_text.encode("utf-8"))
             if search_text_bytes > MAX_SEARCH_INDEX_TEXT_BYTES:
                 raise ValueError("EPUB full-text index exceeds Reader limit")
-            search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": chapter_text})
-    search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
+            search_chapters.append({
+                "index": chapter_index,
+                "title": record["title"],
+                "path": target.relative_to(output).as_posix(),
+                "text": chapter_text,
+            })
+    search_index = {"version": 2, "kind": "epub-search-index", "chapters": search_chapters}
+    search_data = canonical_json(search_index)
+    if len(search_data) > MAX_SEARCH_INDEX_TEXT_BYTES:
+        raise ValueError("EPUB full-text index exceeds Reader limit")
+    filter_budget = min(MAX_SEARCH_BIGRAM_FILTER_BYTES, MAX_SEARCH_INDEX_TEXT_BYTES - len(search_data))
+    if filter_budget:
+        for item in search_chapters:
+            filter_bytes = _bigram_filter(item["text"])
+            if filter_bytes is None:
+                continue
+            encoded = base64.b64encode(filter_bytes).decode("ascii")
+            added_bytes = len(encoded) + len(',"bf":')
+            if added_bytes > filter_budget:
+                continue
+            item["bf"] = encoded
+            filter_budget -= added_bytes
+        search_data = canonical_json(search_index)
     if len(search_data) > MAX_SEARCH_INDEX_TEXT_BYTES:
         raise ValueError("EPUB full-text index exceeds Reader limit")
     search_bytes = gzip.compress(search_data, mtime=0)

@@ -1,4 +1,5 @@
 import concurrent.futures
+import base64
 import gzip
 import hashlib
 import http.client
@@ -24,6 +25,10 @@ from scripts import epub_chapters, reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
+    def test_bigram_filter_vector_matches_reader_worker_encoding(self):
+        encoded = base64.b64encode(epub_chapters._bigram_filter("读手机书")).decode("ascii")
+        self.assertEqual(encoded, "CP0BAEAAAAAgAgIAEAAAAIRAAAAAAACAIAgAAAABAAA=")
+
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
@@ -171,6 +176,12 @@ class ReaderAssetContractTests(unittest.TestCase):
             self.assertTrue((output / "resources/shared/OEBPS/images/x.png").is_file())
             self.assertTrue((output / "epub-search-index.json.gz").is_file())
             self.assertEqual(manifest["search_index"]["bytes"], (output / "epub-search-index.json.gz").stat().st_size)
+            search_index = json.loads(gzip.decompress((output / "epub-search-index.json.gz").read_bytes()))
+            self.assertEqual(search_index["version"], 2)
+            self.assertTrue(all("bf" in item for item in search_index["chapters"]))
+            self.assertLessEqual(sum(len(base64.b64decode(item["bf"]))
+                                     for item in search_index["chapters"]),
+                                 epub_chapters.MAX_SEARCH_BIGRAM_FILTER_BYTES)
 
     def test_chapter_bundle_skips_oversized_resource_sets(self):
         with tempfile.TemporaryDirectory() as root:
@@ -299,6 +310,34 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result["status"], "ready")
             self.assertIn("chapter_manifest", result)
 
+    def test_malformed_epub_chapter_xml_uses_calibre_repack(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source, output, work = root / "source.epub", root / "bundle", root / "work"
+            source.write_bytes(b"original EPUB")
+            work.mkdir()
+            calls = []
+
+            def build(epub, target):
+                calls.append(epub)
+                if epub == source:
+                    raise convert_reader_assets.ET.ParseError("junk after document element")
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "chapter-manifest.json").write_text("{}", encoding="utf-8")
+                return {"chapters": []}
+
+            def repack(command, **_kwargs):
+                Path(command[2]).write_bytes(b"Calibre repaired EPUB")
+
+            with patch.object(epub_chapters, "build_bundle", side_effect=build), \
+                    patch.object(convert_reader_assets, "run_checked", side_effect=repack) as run, \
+                    patch.object(convert_reader_assets, "validate_output"):
+                convert_reader_assets.build_epub_chapter_bundle(source, output, "epub", work)
+
+            self.assertEqual(calls, [source, work / "chapter-source-repaired.epub"])
+            self.assertEqual(run.call_args.args[0][0:2], ["ebook-convert", str(source)])
+            self.assertEqual(run.call_args.args[0][-2:], ["--flow-size", "0"])
+
     def test_queues_only_supported_changed_files(self):
         queue = scan_reader_assets.build_queue(
             self.records, self.revisions, reader_assets.empty_manifest()
@@ -330,6 +369,23 @@ class ScannerTests(unittest.TestCase):
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = reader_assets.EPUB_CHAPTER_PROFILE
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_manifest"] = "objects/a/chapter-manifest.json"
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
+
+    def test_chapter_bundle_failure_waits_for_profile_change_or_explicit_retry(self):
+        records = [{
+            "Repo": "VoiceOfML/Test", "File": "Big", "Extension": "epub", "Folder": [],
+            "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1,
+        }]
+        manifest = reader_assets.empty_manifest()
+        manifest["files"] = {"VoiceOfML/Test\0Big.epub": {
+            "status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate",
+            "chapter_bundle_profile": reader_assets.EPUB_CHAPTER_PROFILE,
+            "chapter_bundle_error": "ParseError: malformed OPF",
+        }}
+        self.assertEqual(scan_reader_assets.build_queue(records, {"VoiceOfML/Test": "rev1"}, manifest), [])
+        self.assertEqual(len(scan_reader_assets.build_queue(
+            records, {"VoiceOfML/Test": "rev1"}, manifest, retry_failed=True)), 1)
+        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = "epub-chapters-v7-bucket"
+        self.assertEqual(len(scan_reader_assets.build_queue(records, {"VoiceOfML/Test": "rev1"}, manifest)), 1)
 
     def test_ebook_without_chapters_is_requeued_for_upgrade(self):
         revisions = {"VoiceOfML/Test": "rev1"}
@@ -1719,7 +1775,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_ebook_chapter_bundle_is_bucket_staged_and_sidecar_points_to_shared_bucket(self):
         key = "VoiceOfML/Test\0A/Book.epub"
-        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v7-bucket/epub-chapters/chapter-manifest.json"
+        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v8-bucket/epub-chapters/chapter-manifest.json"
         result = {
             "key": key, "status": "ready", "source_revision": "rev1",
             "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "epub",
@@ -1752,7 +1808,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_ebook_chapter_bundle_syncs_to_existing_pdf_bucket(self):
         key = "VoiceOfML/Test\0A/Book.epub"
-        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v7-bucket/epub-chapters/chapter-manifest.json"
+        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v8-bucket/epub-chapters/chapter-manifest.json"
         result = {
             "key": key, "status": "ready", "source_revision": "rev1",
             "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "epub",

@@ -1375,6 +1375,34 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
         raise RuntimeError("original Foliate asset is empty")
 
 
+def build_epub_chapter_bundle(chapter_source: Path, output: Path, extension: str, work: Path):
+    try:
+        from . import epub_chapters
+    except ImportError:
+        import epub_chapters
+
+    try:
+        return epub_chapters.build_bundle(chapter_source, output)
+    except ET.ParseError as original_error:
+        if extension != "epub":
+            raise
+        print(f"warning: original EPUB XML is malformed; retrying chapter extraction after Calibre repack: {original_error}")
+        repaired = work / "chapter-source-repaired.epub"
+        run_checked(
+            ["ebook-convert", str(chapter_source), str(repaired), "--flow-size", "0"],
+            timeout_seconds=EPUB_COMMAND_TIMEOUT_SECONDS,
+        )
+        validate_output(repaired, "epub")
+        shutil.rmtree(output, ignore_errors=True)
+        try:
+            return epub_chapters.build_bundle(repaired, output)
+        except Exception as repair_error:
+            raise RuntimeError(
+                f"original EPUB XML was malformed ({original_error}); "
+                f"Calibre repair did not produce a chapter bundle ({repair_error})"
+            ) from repair_error
+
+
 def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
@@ -1727,10 +1755,6 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         chapter_bundle_error = None
         if needs_epub_chapters(item["extension"], item["reader_mode"], source_bytes):
             try:
-                try:
-                    from . import epub_chapters
-                except ImportError:
-                    import epub_chapters
                 chapter_source = target
                 if item["extension"] == "epub":
                     # Preserve the original spine, text and links. Normalizing
@@ -1745,7 +1769,11 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 # profile. Hash all resources so those builds never overwrite
                 # each other's immutable URLs.
                 staged_chapters = work / "chapter-bundle"
-                epub_chapters.build_bundle(chapter_source, staged_chapters)
+                build_epub_chapter_bundle(chapter_source, staged_chapters, item["extension"], work)
+                try:
+                    from . import epub_chapters
+                except ImportError:
+                    import epub_chapters
                 chapter_parent = (Path(*Path(object_path).parts[:3])
                                   / epub_chapters.bundle_version(staged_chapters)
                                   / f"{Path(object_path).parent.name}-{EPUB_CHAPTER_PROFILE}")
