@@ -123,9 +123,12 @@ def conversion_contract(extension: str, key: str = "") -> tuple[str, str, str]:
 
 def needs_epub_chapters(extension: str, reader_mode: str, source_bytes: int) -> bool:
     """Whether an ebook should receive an independently fetched chapter bundle."""
-    # CHM navigation includes groups and repeated fragment targets. The flat
-    # chapter bundle cannot represent that tree; keep its repaired native EPUB.
-    return extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate"
+    # CHM is already converted to an EPUB before this stage. The generated
+    # bundle preserves the EPUB TOC depth and anchors, so it can use the same
+    # search/index path as the other ebook formats.
+    return (extension in {"epub", "mobi", "azw3", "fb2"} and reader_mode == "foliate") or (
+        extension == "chm" and reader_mode == "epub"
+    )
 
 
 def source_password(repo: str, path: str) -> str:

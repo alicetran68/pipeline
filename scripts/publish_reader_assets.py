@@ -263,7 +263,8 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                 baseline = current_entries
             elif current_entries != baseline:
                 raise RuntimeError("reader asset key changed during publication retry")
-            if not objects_uploaded and (bundle / "objects").is_dir():
+            if (not objects_uploaded and not data.get("skip_object_upload")
+                    and (bundle / "objects").is_dir()):
                 api.upload_folder(
                     repo_id=repo_id, folder_path=bundle, repo_type="dataset",
                     allow_patterns="objects/**", commit_message="Upload Reader Asset objects",
@@ -274,7 +275,8 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             range_manifest = remote_state(api, repo_id, revision)
             manifest, operations = build_publish(api, repo_id, bundle, revision, range_manifest)
             bucket_root = bundle / "ebook-chapters"
-            if not bucket_uploaded and bucket_root.is_dir():
+            if (not bucket_uploaded and not data.get("skip_bucket_sync")
+                    and bucket_root.is_dir()):
                 sync_bucket(str(bucket_root), f"hf://buckets/{PDF_PAGES_BUCKET}/ebook-chapters",
                             token=os.environ.get("HF_TOKEN"), quiet=True)
                 bucket_uploaded = True

@@ -233,8 +233,8 @@ class ReaderAssetContractTests(unittest.TestCase):
                     extension, "foliate", 8 * 1024 * 1024))
                 self.assertTrue(reader_assets.needs_epub_chapters(
                     extension, "foliate", 8 * 1024 * 1024 - 1))
-        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
-        self.assertFalse(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
+        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
+        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):
         with tempfile.TemporaryDirectory() as root:

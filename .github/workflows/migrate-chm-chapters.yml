@@ -1,0 +1,52 @@
+name: Migrate CHM EPUB chapters
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard_count:
+        description: Stable shard count; keep 24 when resuming
+        required: true
+        default: "24"
+        type: string
+      limit:
+        description: Maximum books per shard; 0 means all assigned books
+        required: true
+        default: "0"
+        type: string
+      dry_run:
+        description: Count assigned books only
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: reader-assets
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install pipeline dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Migrate shard ${{ matrix.shard }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: |
+          [[ "${{ inputs.shard_count || '24' }}" =~ ^[0-9]+$ ]] && ((10#${{ inputs.shard_count || '24' }} == 24)) || { echo "shard_count must remain 24 for stable resume" >&2; exit 1; }
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || { echo "limit must be non-negative" >&2; exit 1; }
+          args=(--assets-repo "${READER_ASSETS_REPO}" --shard-count 24 --shard-index "${{ matrix.shard }}" --limit "${{ inputs.limit || '0' }}")
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then args+=(--dry-run); fi
+          python scripts/migrate_chm_chapters.py "${args[@]}"

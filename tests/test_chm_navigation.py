@@ -10,7 +10,7 @@ from scripts.chm_navigation import SitemapParser, SourcePaths, flatten, navigati
 class ChmNavigationTests(unittest.TestCase):
     def test_chm_keeps_native_tree_instead_of_flat_chapter_sidecar(self):
         from scripts.reader_assets import needs_epub_chapters
-        self.assertFalse(needs_epub_chapters('chm','epub',32*1024*1024))
+        self.assertTrue(needs_epub_chapters('chm','epub',32*1024*1024))
 
     def test_repaired_encoded_anchor_and_linked_full_size_image(self):
         from scripts.chm_resources import repair_images, repair_links
