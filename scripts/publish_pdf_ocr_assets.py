@@ -7,19 +7,22 @@ import argparse
 import gzip
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_ocr, shared
     from .reader_assets import READER_ASSETS_REPO
+    from .reader_bucket import INDEX_FILES, read_json as read_bucket_json, read_bytes as read_bucket_bytes
 except ImportError:
     import pdf_ocr
     import shared
     from reader_assets import READER_ASSETS_REPO
+    from reader_bucket import INDEX_FILES, read_json as read_bucket_json, read_bytes as read_bucket_bytes
 
 
 OCR_MANIFEST_NAME = "pdf_ocr_manifest.json"
@@ -27,6 +30,12 @@ SIDECAR_NAME = "reader_assets.json.gz"
 
 
 def load_remote(api: HfApi, repo: str, filename: str, fallback):
+    bucket_name = {"manifest.json": "manifest", OCR_MANIFEST_NAME: "ocr"}.get(filename)
+    if bucket_name and type(api) is HfApi:
+        try:
+            return read_bucket_json(INDEX_FILES[bucket_name], os.environ.get("HF_TOKEN"))
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=filename)
     except HfHubHTTPError as exc:
@@ -37,6 +46,15 @@ def load_remote(api: HfApi, repo: str, filename: str, fallback):
 
 
 def load_sidecar(api: HfApi, repo: str) -> dict:
+    if type(api) is HfApi:
+        try:
+            data = json.loads(gzip.decompress(read_bucket_bytes(
+                INDEX_FILES["sidecar"], os.environ.get("HF_TOKEN"))).decode("utf-8"))
+            if data.get("v") != 1 or not isinstance(data.get("f"), dict):
+                raise ValueError("invalid Reader bucket sidecar")
+            return data
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=SIDECAR_NAME)
     except HfHubHTTPError as exc:
@@ -79,7 +97,6 @@ def published(current: dict, results: list[dict]) -> bool:
         if result.get("status") == "ready":
             if (entry.get("status") != "ready" or entry.get("profile") != result.get("profile")
                     or entry.get("source_sha256") != result.get("source_sha256")
-                    or entry.get("classification") != result.get("classification")
                     or entry.get("ocr_manifest") != result.get("ocr_manifest")
                     or entry.get("page_manifest") != result.get("page_manifest")):
                 return False
@@ -116,6 +133,17 @@ def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> N
         try:
             api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
                               commit_message="Publish PDF OCR metadata", parent_commit=info.sha)
+            if type(api) is HfApi and os.environ.get("HF_TOKEN"):
+                with tempfile.TemporaryDirectory(prefix="pdf-ocr-index-") as root:
+                    index_root = Path(root) / "reader-index"
+                    index_root.mkdir(parents=True, exist_ok=True)
+                    (index_root / "pdf_ocr_manifest.json").write_text(
+                        json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    (index_root / "reader_assets.json.gz").write_bytes(encode_sidecar(sidecar))
+                    sync_bucket(root, "hf://buckets/vomebook/pdf-pages",
+                                 include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
             return
         except HfHubHTTPError as exc:
             status = getattr(exc.response, "status_code", None)

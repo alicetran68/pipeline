@@ -17,12 +17,12 @@ class RenderScheduleTests(unittest.TestCase):
         books += [self.book(f"fast-{i}.pdf", 500, 14.7 * 60 / 500) for i in range(9)]
         source = {"shards": [{"records": books}]}
         old = stages.plan_render_ranges(source, {})
-        new = stages.plan_render_ranges(source, {}, target_seconds=1500)
+        new = stages.plan_render_ranges(source, {}, 1500)
         old_loads = [sum(schedule.task_seconds(t) for t in s["records"]) for s in old["shards"]]
         new_loads = [sum(schedule.task_seconds(t) for t in s["records"]) for s in new["shards"]]
         self.assertLess(max(new_loads), max(old_loads) / 3)
         self.assertLess(max(new_loads), 1500 * 1.5)
-        self.assertEqual(new, stages.plan_render_ranges(source, {}, target_seconds=1500))
+        self.assertEqual(new, stages.plan_render_ranges(source, {}, 1500))
         for book in books:
             intervals = sorted((t["start"], t["end"]) for shard in new["shards"] for t in shard["records"]
                                if t["key"] == book["key"])
@@ -33,7 +33,7 @@ class RenderScheduleTests(unittest.TestCase):
 
     def test_matrix_cap_keeps_all_work_and_reports_over_target_load(self):
         book = self.book("huge.pdf", 5000, 100)
-        queue = stages.plan_render_ranges({"shards": [{"records": [book]}]}, {}, target_seconds=100)
+        queue = stages.plan_render_ranges({"shards": [{"records": [book]}]}, {}, 100)
         self.assertEqual(queue["shard_count"], 256)
         self.assertEqual(sum(s["page_count"] for s in queue["shards"]), 5000)
         self.assertGreater(max(s["estimated_seconds"] for s in queue["shards"]), 100)
@@ -69,7 +69,7 @@ class RenderScheduleTests(unittest.TestCase):
     def test_invalid_target_cannot_produce_a_partial_queue(self):
         for value in (0, -1, True, math.inf, math.nan):
             with self.assertRaises(ValueError):
-                stages.plan_render_ranges({"shards": []}, {}, target_seconds=value)
+                stages.plan_render_ranges({"shards": []}, {}, value)
 
 
 if __name__ == "__main__":

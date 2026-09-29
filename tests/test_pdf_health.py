@@ -198,18 +198,5 @@ class PdfHealthTests(unittest.TestCase):
         self.assertEqual(set(merged["files"]), {"other\0a.pdf", "other\0b.pdf", "r\0book.pdf"})
         self.assertEqual([call.kwargs["parent_commit"] for call in api.create_commit.call_args_list], ["one", "two"])
 
-    def test_workflow_contracts(self):
-        root = Path(__file__).parents[1]
-        worker = (root / ".github/workflows/pdf-health-worker.yml").read_text(encoding="utf-8")
-        controller = (root / ".github/workflows/scheduled-pdf-health.yml").read_text(encoding="utf-8")
-        self.assertIn("group: reader-assets-pdf-health", worker)
-        self.assertIn("max-parallel: 18", worker)
-        self.assertIn("poppler-utils qpdf", worker)
-        self.assertNotIn("pdftocairo", worker)
-        self.assertIn('cron: "*/30 * * * *"', controller)
-        self.assertIn('status == "queued" or .status == "in_progress"', controller)
-        self.assertIn("pdf-health-worker.yml/dispatches", controller)
-
-
 if __name__ == "__main__":
     unittest.main()

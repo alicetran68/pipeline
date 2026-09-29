@@ -15,8 +15,12 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_assets
+    from .reader_bucket import materialize as materialize_bucket
+    from .reader_bucket import read_json as read_bucket_json, INDEX_FILES
 except ImportError:
     import pdf_assets
+    from reader_bucket import materialize as materialize_bucket
+    from reader_bucket import read_json as read_bucket_json, INDEX_FILES
 
 
 MAX_GITHUB_MATRIX_SHARDS = 240
@@ -40,6 +44,8 @@ def hf_retry_call(operation, description):
 
 def source_path(item: dict, source_dir: Path | None, assets_repo: str) -> Path:
     if item.get("source_kind") == "generated":
+        if item.get("reader_assets_bucket") and item.get("reader_assets_path"):
+            return materialize_bucket(item["reader_assets_path"], os.environ.get("HF_TOKEN"), ".pdf")
         return Path(hf_retry_call(
             lambda: hf_hub_download(item["reader_assets_repo"], item["reader_assets_path"],
                                      repo_type="dataset", revision=item["reader_assets_revision"],
@@ -190,28 +196,38 @@ def main() -> int:
                 repo_id=args.assets_repo, repo_type="dataset").sha,
             "reading Reader-Assets revision")
         if not args.reader_assets_manifest:
-            manifest = hf_retry_call(
-                lambda: hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
-                                         revision=reader_assets_revision,
-                                         token=os.environ.get("HF_TOKEN")),
-                "downloading Reader-Assets manifest")
-            args.reader_assets_manifest = Path(manifest)
+            try:
+                bucket_manifest = read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN"))
+                temp = Path("output/pdf-assets/reader-bucket-manifest.json")
+                temp.parent.mkdir(parents=True, exist_ok=True)
+                temp.write_text(json.dumps(bucket_manifest, ensure_ascii=False), encoding="utf-8")
+                args.reader_assets_manifest = temp
+            except (FileNotFoundError, OSError, ValueError):
+                manifest = hf_retry_call(
+                    lambda: hf_hub_download(args.assets_repo, "manifest.json", repo_type="dataset",
+                                             revision=reader_assets_revision,
+                                             token=os.environ.get("HF_TOKEN")),
+                    "downloading Reader-Assets manifest")
+                args.reader_assets_manifest = Path(manifest)
         records.extend(pdf_assets.load_generated_records(
             args.reader_assets_manifest, args.assets_repo, args.repo, reader_assets_revision))
     records.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
                                    item["repo"], item["path"], item["source_kind"]))
     try:
-        manifest_path = hf_retry_call(
-            lambda: hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
-                                    token=os.environ.get("HF_TOKEN")),
-            "downloading PDF asset manifest")
-        pdf_manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    except HfHubHTTPError as error:
-        if getattr(error.response, "status_code", None) != 404:
-            raise
-        pdf_manifest = {"files": {}}
-    except (OSError, ValueError, json.JSONDecodeError):
-        pdf_manifest = {"files": {}}
+        pdf_manifest = read_bucket_json(INDEX_FILES["pdf"], os.environ.get("HF_TOKEN"))
+        if pdf_manifest.get("version") != 1 or not isinstance(pdf_manifest.get("files"), dict):
+            raise ValueError("invalid bucket PDF manifest")
+    except (FileNotFoundError, OSError, ValueError):
+        try:
+            manifest_path = hf_retry_call(
+                lambda: hf_hub_download(args.assets_repo, "pdf_manifest.json", repo_type="dataset",
+                                        token=os.environ.get("HF_TOKEN")),
+                "downloading PDF asset manifest")
+            pdf_manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        except HfHubHTTPError as error:
+            if getattr(error.response, "status_code", None) != 404:
+                raise
+            pdf_manifest = {"files": {}}
     records = pending_records(records, pdf_manifest)
     selected = pdf_assets.queue(records, args.limit, args.checkpoint)
     quarantine = {(key, str(entry.get("source_revision") or ""))

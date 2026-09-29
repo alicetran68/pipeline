@@ -17,8 +17,10 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_ocr
+    from .reader_bucket import materialize as materialize_bucket
 except ImportError:
     import pdf_ocr
+    from reader_bucket import materialize as materialize_bucket
 
 
 def _bucket_retry_delay(error: HfHubHTTPError, attempt: int) -> int:
@@ -68,6 +70,8 @@ def source_path(item: dict) -> Path:
     for attempt in range(6):
         try:
             if item.get("source_kind") == "generated":
+                if item.get("reader_assets_bucket") and item.get("reader_assets_path"):
+                    return materialize_bucket(item["reader_assets_path"], os.environ.get("HF_TOKEN"), ".pdf")
                 return Path(hf_hub_download(
                     item["reader_assets_repo"], item["reader_assets_path"], repo_type="dataset",
                     revision=item["reader_assets_revision"], token=os.environ.get("HF_TOKEN")))

@@ -265,38 +265,18 @@ def native_page(path: Path, page: int) -> dict:
 
 
 def page_text_probe(path: Path, page: int) -> int:
-    for mode in ([], ["-raw"], ["-layout"]):
-        raw = _run(["pdftotext", *mode, "-f", str(page), "-l", str(page),
-                    "-enc", "UTF-8", str(path), "-"])
-        count = len(re.sub(r"\s+", "", clean_text(raw)))
-        if count:
-            return count
-    return 0
-
-
-def document_text_probe(path: Path, page_count: int) -> list[int]:
-    """Extract a document's text once, then split it into PDF pages.
-
-    Starting Poppler once per page makes planning multi-thousand-page books
-    needlessly slow.  Keep the alternate extraction modes because repaired
-    CJK fonts may only decode through ``-raw`` or ``-layout`` on some Poppler
-    builds.
-    """
-    for mode in ([], ["-raw"], ["-layout"]):
-        try:
-            raw = _run(["pdftotext", *mode, "-enc", "UTF-8", str(path), "-"])
-        except RuntimeError:
-            continue
-        pages = raw.split("\f")[:page_count]
-        counts = [len(re.sub(r"\s+", "", clean_text(text))) for text in pages]
-        if any(counts) or not raw:
-            return counts + [0] * (page_count - len(counts))
-    return [0] * page_count
+    raw = _run(["pdftotext", "-f", str(page), "-l", str(page), "-enc", "UTF-8", str(path), "-"])
+    return len(re.sub(r"\s+", "", clean_text(raw)))
 
 
 def probe_pdf(path: Path) -> dict:
     page_count = pdf_page_count(path)
-    page_chars = document_text_probe(path, page_count)
+    page_chars = []
+    for page in range(1, page_count + 1):
+        try:
+            page_chars.append(page_text_probe(path, page))
+        except RuntimeError:
+            page_chars.append(0)
     native_pages = sum(chars >= MIN_NATIVE_PAGE_CHARS for chars in page_chars)
     ratio = native_pages / page_count
     if native_pages == page_count:
@@ -455,38 +435,24 @@ def get_ocr_engine(language=None, backend=None):
     return _OCR_ENGINE_INSTANCES[cache_key]
 
 
-def page_sizes(path: Path, start: int, end: int) -> dict[int, tuple[float, float]]:
-    """Read all page geometries in a render range with one Poppler invocation."""
-    try:
-        info = _run(["pdfinfo", "-f", str(start), "-l", str(end), "-box", str(path)])
-    except RuntimeError:
-        return {}
-    return {int(page): (float(width), float(height)) for page, width, height in re.findall(
-        r"^Page\s+(\d+)\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info, re.MULTILINE)
-        if start <= int(page) <= end}
-
-
-def _page_render_dpi(path: Path, page: int, size: tuple[float, float] | None = None) -> int:
+def _page_render_dpi(path: Path, page: int) -> int:
     """Choose a DPI that keeps unusually large PDF pages within the OCR budget."""
     try:
-        if size is None:
-            info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
-            match = re.search(r"Page(?:\s+\d+)?\s+size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
-            if not match:
-                return OCR_DPI
-            size = tuple(float(value) for value in match.groups())
-        width_points, height_points = size
+        info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+        match = re.search(r"Page size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+        if not match:
+            return OCR_DPI
+        width_points, height_points = (float(value) for value in match.groups())
         area = width_points * height_points
         if area <= 0:
             return OCR_DPI
         max_dpi = int(72 * (MAX_PAGE_PIXELS / area) ** 0.5)
-        return max(1, min(OCR_DPI, max_dpi))
+        return max(24, min(OCR_DPI, max_dpi))
     except Exception:
         return OCR_DPI
 
 
-def scan_reader_images(path: Path, start: int, end: int,
-                       sizes: dict[int, tuple[float, float]] | None = None) -> dict[int, tuple[int, int]]:
+def scan_reader_images(path: Path, start: int, end: int) -> dict[int, tuple[int, int]]:
     """Find unambiguous, nearly full-page raster scans and their source pixels."""
     try:
         listing = _run(["pdfimages", "-f", str(start), "-l", str(end), "-list", str(path)])
@@ -516,14 +482,11 @@ def scan_reader_images(path: Path, start: int, end: int,
         if min(width, height, x_ppi, y_ppi) < 1:
             continue
         try:
-            size = (sizes or {}).get(page)
-            if size is None:
-                info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
-                match = re.search(r"Page(?:\s+\d+)? size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
-                if not match:
-                    continue
-                size = tuple(float(value) for value in match.groups())
-            page_width, page_height = (value / 72 for value in size)
+            info = _run(["pdfinfo", "-f", str(page), "-l", str(page), "-box", str(path)])
+            match = re.search(r"Page(?:\s+\d+)? size:\s*([0-9.]+)\s+x\s+([0-9.]+)\s+pts", info)
+            if not match:
+                continue
+            page_width, page_height = (float(value) / 72 for value in match.groups())
             coverage = (width / x_ppi / page_width, height / y_ppi / page_height)
             if all(0.85 <= value <= 1.1 for value in coverage):
                 result[page] = (width, height)
@@ -548,44 +511,13 @@ def reader_webp_quality(image, full_page_scan: bool) -> int:
                                     and colorful / count <= .03) else WEBP_QUALITY
 
 
-def prerender_pages(path: Path, pages: range, directory: Path,
-                    sizes: dict[int, tuple[float, float]] | None = None) -> set[int]:
-    """Render a short uniform-DPI range; fall back to individual pages on failure."""
-    if len(pages) < 2:
-        return set()
-    dpis = {_page_render_dpi(path, page, (sizes or {}).get(page)) for page in pages}
-    if len(dpis) != 1:
-        return set()
-    prefix = directory / "render-batch"
-    try:
-        _run(["pdftocairo", "-png", "-r", str(dpis.pop()), "-f", str(pages.start),
-              "-l", str(pages.stop - 1), str(path), str(prefix)],
-             timeout=COMMAND_TIMEOUT * len(pages))
-        staged = list(directory.glob("render-batch-*.png"))
-        produced = {int(image.stem.rsplit("-", 1)[1]): image for image in staged}
-        if set(produced) != set(pages) or len(staged) != len(pages):
-            raise RuntimeError("incomplete batch render")
-        for page, image in produced.items():
-            image.replace(directory / f"page-{page:06d}.png")
-        return set(pages)
-    except (RuntimeError, OSError, ValueError):
-        for page in pages:
-            (directory / f"page-{page:06d}.png").unlink(missing_ok=True)
-        return set()
-    finally:
-        for image in directory.glob("render-batch-*.png"):
-            image.unlink(missing_ok=True)
-
-
 def render_page(path: Path, page: int, directory: Path,
-                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False,
-                *, prepared: bool = False, size: tuple[float, float] | None = None) -> tuple[Path, int, int]:
+                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
-    if not prepared:
-        _run([
-            "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page, size)),
-            "-f", str(page), "-l", str(page), str(path), str(prefix),
-        ], timeout=COMMAND_TIMEOUT)
+    _run([
+        "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
+        "-f", str(page), "-l", str(page), str(path), str(prefix),
+    ], timeout=COMMAND_TIMEOUT)
     png = prefix.with_suffix(".png")
     if not png.is_file():
         raise RuntimeError(f"page {page} render missing")
@@ -752,7 +684,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                 page_entry = dict(old_page)
                 if probe["classification"] != "native-text":
                     if not JXL_ENABLED:
-                        for field in ("j", "js", "jb"):
+                        for field in ("j", "jbucket", "js", "jb"):
                             page_entry.pop(field, None)
                     elif reencode_jxl:
                         with tempfile.TemporaryDirectory(dir=temp) as page_temp:
@@ -760,6 +692,7 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                             jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
                             jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
                             page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
+                                                "jbucket": shared.PDF_OCR_INPUT_BUCKET,
                                                "js": jxl_sha, "jb": jxl_bytes})
                 page_results.append(page_entry)
                 continue
@@ -813,10 +746,12 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
                     jxl_path = bundle / root / "pages" / f"page-{page:06d}.jxl"
                     jxl_sha, jxl_bytes = encode_jxl(rendered, jxl_path)
                     page_entry.update({"j": (root / "pages" / jxl_path.name).as_posix(),
+                                       "jbucket": shared.PDF_OCR_INPUT_BUCKET,
                                        "js": jxl_sha, "jb": jxl_bytes})
             if input_png_path:
                 input_sha, input_bytes = shared.hash_file(input_png_path)
                 page_entry.update({"i": (root / "ocr-input" / input_png_path.name).as_posix(),
+                                   "ibucket": shared.PDF_OCR_INPUT_BUCKET,
                                    "is": input_sha, "ib": input_bytes})
             page_results.append(page_entry)
             for suffix in (".png", ".webp"):
@@ -840,6 +775,8 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
     if image_pages and not reuse_previous:
         page_manifest = pdf_assets.compact_page_manifest(
             source_sha, asset_profile(), image_pages, manifest_dir=root,
+            ocr_pages=[{"page": entry["p"], "o": entry["o"], "os": entry["os"], "ob": entry["ob"]}
+                        for entry in page_results],
         )
         page_manifest_path = bundle / root / "page-manifest.json"
         page_manifest_sha, page_manifest_bytes = write_json(page_manifest_path, page_manifest)

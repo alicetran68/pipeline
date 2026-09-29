@@ -6,8 +6,9 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,26 +39,34 @@ class FetchAndParseTests(unittest.TestCase):
 
     def test_write_action_output_is_optional_outside_actions(self):
         with patch.dict(os.environ, {}, clear=True):
-                self.module.write_action_output("data_changed", "true")
+            self.module.write_action_output("data_changed", "true")
 
-    def test_http_get_json_retries_connection_reset_then_succeeds(self):
-        response = type("Response", (), {
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *_: None,
-            "read": lambda self: b'{"ok": true}',
-        })()
-        error = urllib.error.URLError(ConnectionResetError("peer reset"))
-        with patch.object(self.module.urllib.request, "urlopen", side_effect=[error, error, response]), \
-             patch.object(self.module.time, "sleep") as sleep:
-            self.assertEqual(self.module.http_get_json("https://example.test"), {"ok": True})
-        self.assertEqual(sleep.call_count, 2)
-
-    def test_http_get_json_retries_server_errors_and_fails_after_bound(self):
+    def test_json_request_retries_transient_http_errors(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = b'{"sha": "captured"}'
         error = urllib.error.HTTPError("https://example.test", 503, "busy", {}, None)
-        with patch.object(self.module.urllib.request, "urlopen", side_effect=[error] * 5), \
+
+        with patch.object(urllib.request, "urlopen", side_effect=[error, response]), \
              patch.object(self.module.time, "sleep") as sleep:
-            self.assertEqual(self.module.http_get_json("https://example.test"), {})
-        self.assertEqual(sleep.call_count, 4)
+            result = self.module.http_get_json("https://example.test")
+
+        self.assertEqual(result, {"sha": "captured"})
+        sleep.assert_called_once_with(1)
+
+    def test_text_request_retries_transient_network_errors(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.read.return_value = "目录\n".encode("utf-8")
+
+        with patch.object(urllib.request, "urlopen", side_effect=[urllib.error.URLError("temporary"), response]), \
+             patch.object(self.module.time, "sleep") as sleep:
+            result = self.module.http_get_text("https://example.test")
+
+        self.assertEqual(result, "目录\n")
+        sleep.assert_called_once_with(1)
 
     def test_main_reports_unchanged_without_generating_output(self):
         with tempfile.TemporaryDirectory() as temporary:

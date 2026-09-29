@@ -3,12 +3,6 @@
 `Render PDF OCR Inputs` (`pdf-render-inputs.yml`) supplies the durable inputs
 for `Build PDF OCR Assets` (`pdf-ocr-assets.yml`). The latter also runs on render
 workflow completion and can be dispatched independently to drain its backlog.
-`Schedule Large PDF Rendering` checks hourly and dispatches the
-large render workflow from the current `main` only when no render run is pending,
-queued or active. This includes the existing older long-running batches; the
-controller never cancels or replaces them. Manual renders remain available.
-Manually scoped sources can select distinct `render_lane` values to run builds
-independently; every publish job still uses the `reader-assets` lock.
 The existing large-PDF WebP worker is not the supplier of OCR images: its
 100 MiB policy and lossy delivery images are unsuitable for that purpose.
 The image OCR concurrency group is `pdf-image-ocr-assets`; legacy monolithic
@@ -59,16 +53,9 @@ the shared `reader-assets` publication lock.
   multi-artifact downloads. Legacy runs with no result files fail explicitly;
   range runs record incomplete books and retry missing ranges on the next run.
   `recover_run` republishes validated artifacts from a completed main-branch
-  render run without recomputing or reuploading its PNG images. Large batches
-  fetch result artifacts serially with secondary-rate-limit backoff before
-  publication; downloading hundreds concurrently can fail before any progress
-  reaches Reader-Assets. For an interrupted large recovery, dispatch with
-  `recover_run` and `recover_progress_only=true`: verified ranges are saved in
-  small batches, and repeated recovery skips ranges already recorded remotely.
-  This mode does not assemble or expose complete books; render publication must
-  follow after missing ranges are built.
+  render run without recomputing or reuploading its PNG images.
 - Books over 500 pages are scheduled in 250-page ranges; smaller books remain
-  single tasks. Eighteen render workers may run concurrently. Each range uploads
+  single tasks. Ten render workers may run concurrently. Each range uploads
   its immutable pages and checksummed range descriptor before the worker writes
   its result artifact. `pdf_render_progress.json` tracks completed ranges by
   source SHA, profile and book identity. Later batches validate and reuse those
@@ -81,9 +68,6 @@ the shared `reader-assets` publication lock.
   completed books independently. Both workflows share only the final
   `reader-assets` publication lock, so a long tail shard cannot block small
   books from being rendered and published.
-  The small-book schedule now runs in `vomebook/pipeline`; its publication
-  dispatches this repository's `Publish Reader Index` workflow. Do not enable
-  the retired local small-book schedule alongside it.
 - Native-text PDFs can join the page-stream queue without OCR: their extracted
   native text remains the search index and their raster pages are only for
   Reader display. The known GBK 林一章版 files are processed only from their
@@ -127,12 +111,6 @@ do not send those already rendered pages to OCR. Other Lin editions with
 working embedded fonts stay on their existing native PDF path. The explicit
 repair folder allowlist is in `reader_assets.py` and requires a successful
 `gbk-font-repair-v1` asset before a new volume enters this rendering queue.
-To convert a complete listed series, dispatch `Build Reader Assets` with
-`repo=VoiceOfML/Teachers`, `extension=pdf`, and `path_prefix` set to its full
-folder path ending in `/`; first use `dry_run=true`. A scoped queue never
-prunes unrelated Reader mappings. The converted small PDFs are then rendered
-by `vomebook/pipeline`, which triggers the main pipeline's Reader index
-publisher; the main pipeline still owns the PDF book-text publication.
 
 For an **already rendered** book, first inspect the current Reader-Assets
 registry and validate one book without writing remote data:

@@ -172,14 +172,14 @@ class RangePdfTests(unittest.TestCase):
         self.assertEqual(files["b"]["key"], "b")
         self.assertEqual(files["b"]["status"], "no-gain")
 
-    def test_generated_pdf_mapping_expires_when_repair_changes(self):
+    def test_retired_range_mapping_never_overrides_reader_pdf(self):
         base = {"files": {"book": {"status": "ready", "reader_mode": "pdf", "path": "original.pdf",
                                    "sha256": "aaa", "profile": "repair-v1"}}}
         state = {"files": {"book": {"status": "optimized", "source_kind": "generated",
                                     "input_sha256": "aaa", "input_profile": "repair-v1",
                                     "path": "objects/aa/hash/range/document.pdf"}}}
         self.assertEqual(build_reader_assets_index.build_index(base, range_manifest=state)["f"]["book"]["p"],
-                         state["files"]["book"]["path"])
+                         "original.pdf")
         base["files"]["book"]["sha256"] = "bbb"
         self.assertEqual(build_reader_assets_index.build_index(base, range_manifest=state)["f"]["book"]["p"],
                          "original.pdf")
@@ -586,7 +586,7 @@ class RangePdfTests(unittest.TestCase):
                                   api, {"inventories": inventories}, "assets", "rev")
         self.assertEqual(api.list_repo_tree.call_count, 2)
 
-    def test_regular_publication_keeps_optimized_routes_in_atomic_sidecar(self):
+    def test_regular_publication_does_not_publish_retired_optimized_routes(self):
         from scripts import publish_reader_assets, reader_assets
         import gzip
         import json
@@ -605,16 +605,16 @@ class RangePdfTests(unittest.TestCase):
                 publish_reader_assets.publish_bundle(api, "assets", bundle)
         operations = api.create_commit.call_args.kwargs["operations"]
         sidecar = next(op.path_or_fileobj for op in operations if op.path_in_repo == "reader_assets.json.gz")
-        self.assertEqual(json.loads(gzip.decompress(sidecar))["f"]["scan"]["p"], state["files"]["scan"]["path"])
+        self.assertNotIn("scan", json.loads(gzip.decompress(sidecar))["f"])
 
-    def test_new_range_state_routes_optimized_pdf_to_dedicated_bucket(self):
+    def test_new_range_state_is_not_a_reader_route(self):
         from scripts import build_reader_assets_index, pdf_range_state, shared
         state = {"version": 1, "artifact_bucket": shared.PDF_RANGE_BUCKET, "files": {
             "scan": {"status": "optimized", "path": "objects/aa/" + "a" * 64
                       + "/pdf-range-v1-document/document.pdf"}
         }}
         index = build_reader_assets_index.build_index({"files": {}}, range_manifest=state)
-        self.assertEqual(index["f"]["scan"]["b"], shared.PDF_RANGE_BUCKET)
+        self.assertNotIn("scan", index["f"])
         self.assertEqual(pdf_range_state.empty_state()["artifact_bucket"], shared.PDF_RANGE_BUCKET)
 
 

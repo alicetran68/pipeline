@@ -2,6 +2,7 @@
 """Shared file hashing, hash sharding, and Hugging Face retry helpers."""
 
 import hashlib
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -9,6 +10,8 @@ from typing import TypeVar
 CHUNK_BYTES = 1024 * 1024
 PDF_PAGES_BUCKET = "vomebook/pdf-pages"
 PDF_RANGE_BUCKET = "vomebook/pdf-optimized"
+PDF_OCR_INPUT_BUCKET = os.environ.get("PDF_OCR_INPUT_BUCKET", "melsm")
+READER_ASSETS_BUCKET = PDF_PAGES_BUCKET
 
 T = TypeVar("T")
 

@@ -16,11 +16,13 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_assets, pdf_ocr, lin_pdf_text, shared
+    from .reader_bucket import materialize as materialize_bucket
 except ImportError:
     import pdf_assets
     import pdf_ocr
     import lin_pdf_text
     import shared
+    from reader_bucket import materialize as materialize_bucket
 
 
 MAX_OCR_SHARDS = 20
@@ -59,6 +61,8 @@ def retry(operation, label: str):
 
 def download_source(item: dict) -> Path:
     if item.get("source_kind") == "generated":
+        if item.get("reader_assets_bucket") and item.get("reader_assets_path"):
+            return materialize_bucket(item["reader_assets_path"], os.environ.get("HF_TOKEN"), ".pdf")
         return Path(retry(lambda: hf_hub_download(
             item["reader_assets_repo"], item["reader_assets_path"], repo_type="dataset",
             revision=item["reader_assets_revision"], token=os.environ.get("HF_TOKEN")),
@@ -84,11 +88,9 @@ def plan(records: list[dict], workers: int = 4, current: dict | None = None,
             digest, size = shared.hash_file(source)
             probe = lin_pdf_text.probe(source) if lin_pdf_text.applies(item) else pdf_ocr.probe_pdf(source)
             inspected = {**item, "source_sha256": digest, "source_bytes": size, "probe": probe,
-                    "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
-                    **({"native_extractor": "pymupdf-v1"} if lin_pdf_text.applies(item)
-                       and probe["native_page_ratio"] >= .8 else {}),
-                    **({"force_image_render": True} if native_text_stream
-                       and probe["classification"] == "native-text" else {})}
+                     "page_count": probe["page_count"], "status": "planned", "profile": pdf_ocr.asset_profile(),
+                     **({"force_image_render": True} if native_text_stream
+                        and probe["classification"] == "native-text" else {})}
             if render_estimator is not None:
                 inspected["_render_cost"] = render_estimator(inspected, source)
             return inspected

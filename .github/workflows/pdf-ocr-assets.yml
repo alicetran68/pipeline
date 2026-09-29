@@ -23,14 +23,10 @@ on:
         description: Resume only incomplete or failed OCR books from saved page progress
         default: false
         type: boolean
-      source_repo:
-        description: Exact source dataset filter, or blank for all
-        default: ""
-        type: string
-      source_path_prefix:
-        description: Source path prefix filter, or blank for all
-        default: ""
-        type: string
+  workflow_run:
+    workflows: [Render PDF OCR Inputs]
+    types: [completed]
+
 permissions:
   contents: read
 
@@ -41,6 +37,7 @@ concurrency:
 
 jobs:
   plan:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -61,14 +58,12 @@ jobs:
           PDF_OCR_LANG: ${{ inputs.lang || 'auto' }}
           PDF_OCR_BACKEND: ${{ inputs.backend || 'rapidocr_onnxruntime' }}
           RETRY_FAILED_ONLY: ${{ inputs.retry_failed_only || 'false' }}
-          SOURCE_REPO: ${{ inputs.source_repo || '' }}
-          SOURCE_PATH_PREFIX: ${{ inputs.source_path_prefix || '' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$PDF_OCR_TARGET_PAGES_PER_SHARD" =~ ^[0-9]+$ ]] && ((10#$PDF_OCR_TARGET_PAGES_PER_SHARD >= 1 && 10#$PDF_OCR_TARGET_PAGES_PER_SHARD <= 5000)) || exit 1
           args=()
           if [[ "$RETRY_FAILED_ONLY" == true ]]; then args+=(--retry-failed-only); fi
-           python scripts/pdf_ocr_stages.py plan-ocr --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" "${args[@]}"
+          python scripts/pdf_ocr_stages.py plan-ocr --limit "$LIMIT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
@@ -92,7 +87,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements-pdf-ocr.txt
-      - uses: actions/cache@v5
+      - uses: actions/cache@v4
         with:
           path: .cache/paddlex
           key: paddlex-${{ inputs.lang || 'auto' }}-${{ inputs.backend || 'rapidocr_onnxruntime' }}-${{ runner.os }}-${{ hashFiles('scripts/requirements-pdf-ocr.txt') }}

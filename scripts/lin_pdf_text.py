@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+import pymupdf
+
 try:
     from . import pdf_ocr, reader_assets
 except ImportError:
@@ -18,13 +20,7 @@ def applies(item: dict) -> bool:
     return reader_assets.known_gbk_pdf(item.get("repo"), item.get("path"))
 
 
-def open_pdf(path):
-    import pymupdf
-    return pymupdf.open(path)
-
-
 def extract(document, number: int) -> dict:
-    import pymupdf
     page = document[number - 1]
     flags = pymupdf.TEXTFLAGS_DICT | pymupdf.TEXT_INHIBIT_SPACES
     fragments = []
@@ -57,7 +53,7 @@ def extract(document, number: int) -> dict:
 
 
 def probe(path) -> dict:
-    with open_pdf(path) as document:
+    with pymupdf.open(path) as document:
         chars = [len(re.sub(r"\s+", "", extract(document, number)["text"]))
                  for number in range(1, len(document) + 1)]
     native = sum(count >= pdf_ocr.MIN_NATIVE_PAGE_CHARS for count in chars)

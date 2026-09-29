@@ -109,8 +109,7 @@ def repair_pdf(source: Path, target: Path) -> dict:
         raise ValueError("GBK repair requires a separate output file")
     reader = PdfReader(source)
     if reader.is_encrypted:
-        if not reader.decrypt(""):
-            raise ValueError("GBK repair requires a password for encrypted PDFs")
+        raise ValueError("GBK repair does not accept encrypted PDFs")
     writer = PdfWriter(clone_from=reader)
     # Clone all document objects, including fonts in Form XObjects and inherited
     # resources, rather than visiting only fonts directly attached to pages.

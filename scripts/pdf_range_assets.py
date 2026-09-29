@@ -15,17 +15,19 @@ import sys
 import tempfile
 import time
 
-from huggingface_hub import CommitOperationAdd, HfApi, HfFileSystem
+from huggingface_hub import CommitOperationAdd, HfApi, HfFileSystem, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import pdf_range, pdf_range_state, reader_assets, shared
     from .build_reader_assets_index import build_index, encode_index
     from .publish_reader_assets import remote_manifest, remote_pdf_manifest, remote_pdf_ocr_manifest
+    from .reader_bucket import update_lifecycle_consumer
 except ImportError:
     import pdf_range, pdf_range_state, reader_assets, shared
     from build_reader_assets_index import build_index, encode_index
     from publish_reader_assets import remote_manifest, remote_pdf_manifest, remote_pdf_ocr_manifest
+    from reader_bucket import update_lifecycle_consumer
 
 
 def discover(records, revisions, manifest, pdf_manifest, api, state, assets_repo, assets_revision, exact=False):
@@ -364,6 +366,20 @@ def publish(api, repo, baseline, state, bundle, results):
         try:
             commit = api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
                                        commit_message="Optimize PDF layouts after range verification", parent_commit=revision)
+            if type(api) is HfApi and os.environ.get("HF_TOKEN"):
+                with tempfile.TemporaryDirectory(prefix="pdf-range-index-") as root:
+                    index_root = Path(root) / "reader-index"
+                    index_root.mkdir(parents=True, exist_ok=True)
+                    (index_root / "pdf_range_manifest.json").write_text(
+                        reader_assets.canonical_json(state, pretty=True).decode("utf-8"), encoding="utf-8")
+                    (index_root / "reader_assets.json.gz").write_bytes(encode_index(base, images, state, ocr))
+                    sync_bucket(root, f"hf://buckets/{shared.PDF_PAGES_BUCKET}",
+                                include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
+                for result in results:
+                    if result.get("status") in {"optimized", "unchanged", "unsupported"}:
+                        update_lifecycle_consumer(result["key"], "range", "done", os.environ["HF_TOKEN"])
+                    elif result.get("status") == "failed":
+                        update_lifecycle_consumer(result["key"], "range", "failed", os.environ["HF_TOKEN"])
             return commit.oid
         except HfHubHTTPError as error:
             if not shared.is_retryable_hf_status(shared.hf_status_code(error)) or attempt == 5:

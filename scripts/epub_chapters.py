@@ -2,14 +2,12 @@
 """Build a sanitized, independently fetchable EPUB chapter bundle."""
 
 import hashlib
-import base64
 import gzip
 import html
 import json
 import posixpath
 import re
 import zipfile
-import copy
 from collections import Counter
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -18,43 +16,6 @@ from html.parser import HTMLParser
 
 MAX_CHAPTER_RESOURCES = 2000
 MAX_CHAPTER_RESOURCE_BYTES = 512 * 1024 * 1024
-TARGET_CHAPTER_BYTES = 1024 * 1024
-MAX_CHAPTER_BYTES = 8 * 1024 * 1024
-MAX_CHAPTERS = 10000
-MAX_SEARCH_INDEX_TEXT_BYTES = 256 * 1024 * 1024
-MAX_SEARCH_INDEX_PACKED_BYTES = 64 * 1024 * 1024
-MAX_SEARCH_BIGRAM_FILTER_BYTES = 8 * 1024 * 1024
-MAX_CHAPTER_BIGRAM_FILTER_BYTES = 32 * 1024
-BIGRAM_FILTER_HASHES = 7
-MAX_BIGRAM_FILTER_GRAMS = (MAX_CHAPTER_BIGRAM_FILTER_BYTES * 8) // 10
-
-
-def _bigram_filter(text: str) -> bytes | None:
-    """Build a bounded Bloom filter over exact two-codepoint substrings."""
-    grams = set()
-    for gram in zip(text, text[1:]):
-        grams.add(gram)
-        if len(grams) > MAX_BIGRAM_FILTER_GRAMS:
-            return None
-    if not grams:
-        return None
-    bit_count = 1 << max(8, (len(grams) * 10 - 1).bit_length())
-    if bit_count > MAX_CHAPTER_BIGRAM_FILTER_BYTES * 8:
-        return None
-    bits = bytearray(bit_count // 8)
-    mask = bit_count - 1
-    for first, second in grams:
-        h1, h2 = 2166136261, 0x9E3779B9
-        for char in (first, second):
-            codepoint = ord(char)
-            h1 = ((h1 ^ codepoint) * 16777619) & 0xFFFFFFFF
-            h2 ^= (codepoint + 0x9E3779B9 + ((h2 << 6) & 0xFFFFFFFF) + (h2 >> 2)) & 0xFFFFFFFF
-            h2 &= 0xFFFFFFFF
-        h2 |= 1
-        for probe in range(BIGRAM_FILTER_HASHES):
-            bit = (h1 + probe * h2) & mask
-            bits[bit >> 3] |= 1 << (bit & 7)
-    return bytes(bits)
 
 try:
     from .convert_reader_assets import sanitize_css, sanitize_html, sanitize_xml_document
@@ -206,7 +167,7 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     for entry in entries:
         record = by_source.get(entry["source_path"])
         if record is None:
-            continue
+            raise ValueError(f'EPUB TOC target is outside readable spine: {entry["source_path"]}')
         if entry["source_path"] not in documents:
             try:
                 documents[entry["source_path"]] = ET.fromstring(record["clean"])
@@ -216,7 +177,7 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
         if _placeholder_title(title):
             title = _target_title(record["clean"], entry["fragment"], root=documents[entry["source_path"]])
         if _placeholder_title(title):
-            continue
+            raise ValueError(f'EPUB TOC title cannot be recovered: {entry["source_path"]}#{entry["fragment"]}')
         fragment = entry["fragment"]
         root = documents.get(entry["source_path"])
         if fragment and root is not None and not any(
@@ -289,54 +250,8 @@ def _chapter_text(document: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(" ".join(parser.parts))).strip()
 
 
-def _split_spine_record(record: dict) -> list[dict]:
-    """Split oversized spine documents at top-level XHTML elements."""
-    root = ET.fromstring(record["clean"])
-    body = next((node for node in root.iter() if _local_name(node) == "body"), None)
-    if body is None:
-        raise ValueError("EPUB chapter has no body")
-    children = list(body)
-    if not children:
-        if len(record["clean"].encode("utf-8")) > MAX_CHAPTER_BYTES:
-            raise ValueError("EPUB chapter exceeds the Reader chapter limit")
-        return [record]
-    chunks = []
-    current = []
-    wrapper = copy.deepcopy(root)
-    wrapper_body = next(node for node in wrapper.iter() if _local_name(node) == "body")
-    for node in list(wrapper_body):
-        wrapper_body.remove(node)
-    wrapper_bytes = len(ET.tostring(wrapper, encoding="utf-8"))
-    current_bytes = 0
-    for child in children:
-        child_bytes = len(ET.tostring(child, encoding="utf-8"))
-        if current and wrapper_bytes + current_bytes + child_bytes > TARGET_CHAPTER_BYTES:
-            chunks.append(current)
-            current = [child]
-            current_bytes = child_bytes
-        else:
-            current.append(child)
-            current_bytes += child_bytes
-    if current:
-        chunks.append(current)
-    output = []
-    for chunk in chunks:
-        part = copy.deepcopy(root)
-        part_body = next(node for node in part.iter() if _local_name(node) == "body")
-        for node in list(part_body):
-            part_body.remove(node)
-        for node in chunk:
-            part_body.append(copy.deepcopy(node))
-        clean = ET.tostring(part, encoding="unicode", method="xml")
-        size = len(clean.encode("utf-8"))
-        if size > MAX_CHAPTER_BYTES:
-            raise ValueError("single EPUB spine element exceeds the Reader chapter limit")
-        output.append({**record, "clean": clean})
-    return output
-
-
 def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
-                 include_resources: bool = True) -> dict:
+                 include_resources: bool = True, include_all_documents: bool = False) -> dict:
     """Write chapter files and return the validated manifest.
 
     The output directory contains only files intended for a dataset commit.
@@ -357,7 +272,6 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 manifest[node.attrib.get("id", "")] = node.attrib
         chapters = []
         search_chapters = []
-        search_text_bytes = 0
         chapter_records = []
         resource_usage = Counter()
         toc_entries = _toc_entries(archive, opf_path, manifest, names)
@@ -365,12 +279,26 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         for entry in toc_entries:
             if not _placeholder_title(entry["title"]):
                 toc_titles.setdefault(entry["source_path"], entry["title"])
-        for number, ref in enumerate((n for n in opf.iter() if _local_name(n) == "itemref"), 1):
-            item = manifest.get(ref.attrib.get("idref"))
-            if (not item or "nav" in item.get("properties", "").split()
-                    or item.get("media-type", "").lower() not in {"application/xhtml+xml", "text/html"}):
+        document_items = {
+            _zip_path(base, item.get("href", "")): item
+            for item in manifest.values()
+            if "nav" not in item.get("properties", "").split()
+            and item.get("media-type", "").lower() in {"application/xhtml+xml", "text/html"}
+        }
+        spine_paths = []
+        for ref in opf.iter():
+            if _local_name(ref) != "itemref":
                 continue
-            source_path = _zip_path(base, item.get("href", ""))
+            item = manifest.get(ref.attrib.get("idref"))
+            if not item or "nav" in item.get("properties", "").split():
+                continue
+            candidate = _zip_path(base, item.get("href", ""))
+            if candidate in document_items:
+                spine_paths.append(candidate)
+        document_paths = spine_paths + ([path for path in sorted(document_items) if path not in spine_paths]
+                                         if include_all_documents else [])
+        for number, source_path in enumerate(document_paths, 1):
+            item = document_items[source_path]
             if source_path not in names:
                 # Keep readable chapters when a broken package has one stale spine entry.
                 continue
@@ -402,21 +330,6 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             resource_usage.update(resources)
         if not chapter_records:
             raise ValueError("EPUB spine has no readable chapters")
-        split_records = []
-        for record in chapter_records:
-            safe_resources = {_safe_resource_path(resource): resource for resource in record["resources"]}
-            for split in _split_spine_record(record):
-                split["resources"] = {
-                    resource for safe, resource in safe_resources.items()
-                    if f"../resources/__CHAPTER_RESOURCE__/{safe}" in split["clean"]
-                }
-                split_records.append(split)
-        if len(split_records) > MAX_CHAPTERS:
-            raise ValueError("EPUB chapter count exceeds Reader limit")
-        chapter_records = split_records
-        resource_usage = Counter(resource for record in chapter_records for resource in record["resources"])
-        for index, record in enumerate(chapter_records, 1):
-            record["index"] = index
         toc = bundle_toc(toc_entries, chapter_records)
         # Resolve links only after every readable spine item has its final name.
         # Original filenames cannot be used after chapters move into the bundle.
@@ -467,43 +380,13 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
             target.write_text(clean, encoding="utf-8")
             data = target.read_bytes()
             chapters.append({"index": chapter_index, "title": record["title"], "source_path": record["source_path"], "path": target.relative_to(output).as_posix(), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-            chapter_text = _chapter_text(clean)
-            search_text_bytes += len(chapter_text.encode("utf-8"))
-            if search_text_bytes > MAX_SEARCH_INDEX_TEXT_BYTES:
-                raise ValueError("EPUB full-text index exceeds Reader limit")
-            search_chapters.append({
-                "index": chapter_index,
-                "title": record["title"],
-                "path": target.relative_to(output).as_posix(),
-                "text": chapter_text,
-            })
-    search_index = {"version": 2, "kind": "epub-search-index", "chapters": search_chapters}
-    search_data = canonical_json(search_index)
-    if len(search_data) > MAX_SEARCH_INDEX_TEXT_BYTES:
-        raise ValueError("EPUB full-text index exceeds Reader limit")
-    filter_budget = min(MAX_SEARCH_BIGRAM_FILTER_BYTES, MAX_SEARCH_INDEX_TEXT_BYTES - len(search_data))
-    if filter_budget:
-        for item in search_chapters:
-            filter_bytes = _bigram_filter(item["text"])
-            if filter_bytes is None:
-                continue
-            encoded = base64.b64encode(filter_bytes).decode("ascii")
-            added_bytes = len(encoded) + len(',"bf":')
-            if added_bytes > filter_budget:
-                continue
-            item["bf"] = encoded
-            filter_budget -= added_bytes
-        search_data = canonical_json(search_index)
-    if len(search_data) > MAX_SEARCH_INDEX_TEXT_BYTES:
-        raise ValueError("EPUB full-text index exceeds Reader limit")
+            search_chapters.append({"index": chapter_index, "title": record["title"], "path": target.relative_to(output).as_posix(), "text": _chapter_text(clean)})
+    search_data = canonical_json({"version": 1, "kind": "epub-search-index", "chapters": search_chapters})
     search_bytes = gzip.compress(search_data, mtime=0)
-    if len(search_bytes) > MAX_SEARCH_INDEX_PACKED_BYTES:
-        raise ValueError("EPUB compressed search index exceeds Reader limit")
     search_target = output / "epub-search-index.json.gz"
     search_target.write_bytes(search_bytes)
     result = {"version": 1, "kind": "epub-chapters", "chapters": chapters, "search_index": {"path": search_target.relative_to(output).as_posix(), "bytes": len(search_bytes), "sha256": hashlib.sha256(search_bytes).hexdigest()}}
-    if toc:
-        result["toc"] = toc
+    result["toc"] = toc
     if fallback:
         result["fallback"] = fallback
     validate_chapter_manifest(result)

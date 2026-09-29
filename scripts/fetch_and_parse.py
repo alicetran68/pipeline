@@ -16,6 +16,7 @@ import time
 import gzip
 import urllib.parse
 import posixpath
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -71,6 +72,8 @@ BROWSER_KEY_MAP = {
 }
 
 SEARCH_DATA_VERSION = 2
+TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+HTTP_RETRY_DELAYS = (1, 2, 4)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -86,43 +89,46 @@ def _make_request(url: str, token: str) -> urllib.request.Request:
     return req
 
 
-def http_get_json(url: str, token: str = "") -> dict | list:
-    """GET JSON endpoint with bounded retries for transient failures."""
-    max_attempts = 5
-    for attempt in range(max_attempts):
+def _retry_delay(attempt: int) -> int:
+    return HTTP_RETRY_DELAYS[min(attempt, len(HTTP_RETRY_DELAYS) - 1)]
+
+
+def _open_with_retries(req: urllib.request.Request, timeout: int):
+    """Open an HF request, retrying only errors that may resolve by themselves."""
+    for attempt in range(len(HTTP_RETRY_DELAYS) + 1):
         try:
-            with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
-                body = resp.read().decode("utf-8")
-                return json.loads(body)
-        except urllib.error.HTTPError as e:
-            if e.code == 429 or 500 <= e.code <= 599:
-                if attempt + 1 < max_attempts:
-                    wait = min(30, 2 ** attempt)
-                    print(f"  ⏳ HTTP {e.code}，等待 {wait}s 后重试...")
-                    time.sleep(wait)
-                    continue
-                print(f"  ⚠ HTTP {e.code}: {url}")
-                return {}
-            print(f"  ⚠ HTTP {e.code}: {url}")
-            return {}
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-            if attempt + 1 < max_attempts:
-                wait = min(30, 2 ** attempt)
-                print(f"  ⏳ 网络错误，等待 {wait}s 后重试 [{url}]: {e}")
-                time.sleep(wait)
-                continue
-            print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {e}")
-            return {}
-    return {}
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code not in TRANSIENT_HTTP_CODES or attempt >= len(HTTP_RETRY_DELAYS):
+                raise
+            delay = _retry_delay(attempt)
+            print(f"  ⚠ HTTP {error.code}，{delay}s 后重试 ({attempt + 1}/{len(HTTP_RETRY_DELAYS)})...")
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt >= len(HTTP_RETRY_DELAYS):
+                raise
+            delay = _retry_delay(attempt)
+            print(f"  ⚠ 网络请求失败 [{error}]，{delay}s 后重试 ({attempt + 1}/{len(HTTP_RETRY_DELAYS)})...")
+            time.sleep(delay)
+
+
+def http_get_json(url: str, token: str = "") -> dict | list:
+    """GET JSON, retrying transient HF/API failures before returning empty data."""
+    try:
+        with _open_with_retries(_make_request(url, token), timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as error:
+        print(f"  ⚠ HTTP GET JSON 失败 [{url}]: {error}")
+        return {}
 
 
 def http_get_text(url: str, token: str = "") -> str:
-    """GET 文本端点，成功返回字符串，失败返回空字符串。"""
+    """GET text, retrying transient HF/API failures before returning empty text."""
     try:
-        with urllib.request.urlopen(_make_request(url, token), timeout=30) as resp:
+        with _open_with_retries(_make_request(url, token), timeout=30) as resp:
             return resp.read().decode("utf-8")
-    except Exception as e:
-        print(f"  ⚠ HTTP GET TEXT 失败 [{url}]: {e}")
+    except Exception as error:
+        print(f"  ⚠ HTTP GET TEXT 失败 [{url}]: {error}")
         return ""
 
 
@@ -268,7 +274,7 @@ def batch_get_sizes(repo: str, revision: str, paths: list[str], token: str, max_
             req.add_header("Authorization", f"Bearer {token}")
 
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with _open_with_retries(req, timeout=60) as resp:
                 results = json.loads(resp.read().decode("utf-8"))
                 for item in results:
                     p = item.get("path", "")

@@ -1,6 +1,11 @@
 name: Optimize PDF Layouts
 
 on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_run:
+    workflows: [Build Reader Assets]
+    types: [completed]
   workflow_dispatch:
     inputs:
       repo:

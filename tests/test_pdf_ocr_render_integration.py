@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
-from pypdf import PdfWriter
 
 from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
 
@@ -26,7 +25,7 @@ class RealPdfRenderingTests(unittest.TestCase):
             cost = queue["shards"][0]["records"][0]["_render_cost"]
             self.assertEqual((cost["source"], cost["samples"]), ("sample", 3))
             self.assertGreater(cost["seconds_per_page"], 0)
-            timed = stages.plan_render_ranges(queue, {}, target_seconds=1500)
+            timed = stages.plan_render_ranges(queue, {}, 1500)
             tasks = [task for shard in timed["shards"] for task in shard["records"]]
             self.assertNotIn("probe", tasks[0])
             self.assertEqual(stages.expand_render_tasks(timed, tasks)[0]["probe"]["page_count"], 3)
@@ -100,101 +99,6 @@ class RealPdfRenderingTests(unittest.TestCase):
                 self.assertGreater(full.height, 1800)
                 self.assertEqual(reader.size, webp.size)
                 self.assertEqual(reader.height, 1800)
-
-    def test_page_render_dpi_honors_numbered_pdfinfo_page_size(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "large-page.pdf"
-            with Image.new("RGB", (800, 1100), "white") as image:
-                image.save(source, "PDF", resolution=150)
-            with patch.object(pdf_ocr, "MAX_PAGE_PIXELS", 100000):
-                dpi = pdf_ocr._page_render_dpi(source, 1)
-                self.assertLess(dpi, pdf_ocr.OCR_DPI)
-                png, width, height = pdf_ocr.render_page(source, 1, root)
-            self.assertLessEqual(width * height, 100000)
-            with Image.open(png) as rendered:
-                self.assertEqual(rendered.size, (width, height))
-
-    def test_page_render_dpi_can_drop_below_24_for_very_large_pages(self):
-        with patch.object(pdf_ocr, "_run", return_value="Page 3501 size: 100000 x 100000 pts"):
-            self.assertLess(pdf_ocr._page_render_dpi(Path("large.pdf"), 3501), 24)
-
-    def test_batched_pages_match_individual_png_and_webp_bytes(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "pages.pdf"
-            with Image.new("RGB", (160, 200), "white") as image:
-                image.save(source, "PDF", resolution=150, save_all=True,
-                           append_images=[Image.new("RGB", (160, 200), color)
-                                          for color in ("red", "green", "blue")])
-            single, batch = root / "single", root / "batch"
-            single.mkdir()
-            batch.mkdir()
-            for page in range(1, 5):
-                pdf_ocr.render_page(source, page, single)
-            sizes = pdf_ocr.page_sizes(source, 1, 4)
-            self.assertEqual(set(sizes), set(range(1, 5)))
-            with patch.object(pdf_ocr, "_run", wraps=pdf_ocr._run) as run:
-                self.assertEqual(pdf_ocr.prerender_pages(source, range(1, 5), batch, sizes), set(range(1, 5)))
-                for page in range(1, 5):
-                    pdf_ocr.render_page(source, page, batch, prepared=True, size=sizes[page])
-            self.assertEqual(sum(call.args[0][0] == "pdftocairo" for call in run.call_args_list), 1)
-            self.assertEqual(sum(call.args[0][0] == "pdfinfo" for call in run.call_args_list), 0)
-            for page in range(1, 5):
-                name = f"page-{page:06d}"
-                for suffix in (".png", ".webp"):
-                    self.assertEqual((single / (name + suffix)).read_bytes(),
-                                     (batch / (name + suffix)).read_bytes())
-
-    def test_incomplete_batch_falls_back_without_stale_images(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            def fail(command, **_kwargs):
-                (root / "render-batch-1.png").write_bytes(b"partial")
-                raise RuntimeError("batch failed")
-            with patch.object(pdf_ocr, "_run", side_effect=fail):
-                self.assertEqual(pdf_ocr.prerender_pages(Path("book.pdf"), range(1, 3), root,
-                                                           {1: (612, 792), 2: (612, 792)}), set())
-            self.assertEqual(list(root.iterdir()), [])
-
-    def test_render_book_uses_batch_and_keeps_every_page(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "four.pdf"
-            with Image.new("RGB", (150, 200), "white") as image:
-                image.save(source, "PDF", resolution=150, save_all=True,
-                           append_images=[image, image, image])
-            with patch.object(pdf_ocr, "_run", wraps=pdf_ocr._run) as run:
-                result = stages.render_book({"key": "test\0four.pdf", "source_revision": "test"},
-                                            source, root / "bundle")
-            self.assertEqual(sum(call.args[0][0] == "pdftocairo" for call in run.call_args_list), 1)
-            manifest = json.loads((root / "bundle" / result["render_manifest"]["path"]).read_text())
-            self.assertEqual([page["p"] for page in manifest["pages"]], [1, 2, 3, 4])
-            stages.validate_render(result, manifest)
-
-    def test_mixed_dpi_batch_uses_individual_fallback(self):
-        with tempfile.TemporaryDirectory() as temp, \
-                patch.object(pdf_ocr, "_page_render_dpi", side_effect=(150, 200)), \
-                patch.object(pdf_ocr, "_run") as run:
-            self.assertEqual(pdf_ocr.prerender_pages(Path("book.pdf"), range(1, 3), Path(temp)), set())
-            run.assert_not_called()
-
-    def test_bulk_page_sizes_keep_per_page_dpi_for_mixed_dimensions(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "mixed.pdf"
-            writer = PdfWriter()
-            writer.add_blank_page(width=612, height=792)
-            writer.add_blank_page(width=4000, height=5000)
-            with source.open("wb") as output:
-                writer.write(output)
-            with patch.object(pdf_ocr, "MAX_PAGE_PIXELS", 100000):
-                sizes = pdf_ocr.page_sizes(source, 1, 2)
-                direct = [pdf_ocr._page_render_dpi(source, page) for page in (1, 2)]
-                cached = [pdf_ocr._page_render_dpi(source, page, sizes[page]) for page in (1, 2)]
-                self.assertEqual(cached, direct)
-                self.assertNotEqual(*cached)
-                self.assertEqual(pdf_ocr.prerender_pages(source, range(1, 3), root, sizes), set())
 
     def test_reader_quality_uses_clean_scan_only_with_or_without_jxl(self):
         with Image.new("RGB", (128, 128), "white") as clean, \

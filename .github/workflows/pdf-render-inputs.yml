@@ -1,13 +1,11 @@
 name: Render PDF OCR Inputs
 
-run-name: ${{ inputs.continue_queue == true && 'Serial large PDF render' || 'Manual large PDF render' }}
-
 on:
   workflow_dispatch:
     inputs:
       limit:
-        description: Maximum pending large PDFs inspected (the controller uses one)
-        default: "1"
+        description: Maximum pending large PDFs inspected
+        default: "100"
         type: string
       checkpoint:
         description: Checkpoint in the pending PDF queue
@@ -25,36 +23,15 @@ on:
         description: Publish existing render artifacts from this main-branch render run (no rendering)
         default: ""
         type: string
-      recover_progress_only:
-        description: Checkpoint verified ranges from recover_run without assembling whole books
-        default: false
-        type: boolean
-      source_repo:
-        description: Exact source dataset filter, or blank for all
-        default: ""
-        type: string
-      source_path_prefix:
-        description: Source path prefix filter, or blank for all
-        default: ""
-        type: string
-      render_lane:
-        description: Independent lane for a single manually scoped source (blank keeps the shared queue)
-        default: ""
-        type: string
-      force_reprobe:
-        description: Re-probe and rebuild the selected source paths
-        default: false
-        type: boolean
-      continue_queue:
-        description: After a successful book publish, wake the controller for the next book
-        default: false
-        type: boolean
+  schedule:
+    - cron: "13 * * * *"
+
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: ${{ inputs.render_lane && format('pdf-render-inputs-{0}', inputs.render_lane) || 'pdf-render-inputs' }}
+  group: pdf-render-inputs
   cancel-in-progress: false
   queue: max
 
@@ -73,10 +50,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
-      - run: python -m pip install --retries 10 --timeout 60 -r scripts/requirements.txt
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils fonts-noto-cjk
+      - run: pip install -r scripts/requirements.txt
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Fetch source metadata
         if: inputs.recover_run == ''
         env:
@@ -91,20 +66,12 @@ jobs:
           LIMIT: ${{ inputs.limit || '100' }}
           CHECKPOINT: ${{ inputs.checkpoint || '0' }}
           RETRY_FAILED: ${{ github.event_name == 'schedule' || inputs.retry_failed }}
-          SOURCE_REPO: ${{ inputs.source_repo || '' }}
-          SOURCE_PATH_PREFIX: ${{ inputs.source_path_prefix || '' }}
-          RENDER_LANE: ${{ inputs.render_lane || '' }}
-          FORCE_REPROBE: ${{ inputs.force_reprobe || 'false' }}
         run: |
           [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
           [[ "$CHECKPOINT" =~ ^[0-9]+$ ]] || exit 1
-          if [[ -n "$RENDER_LANE" ]]; then
-            [[ "$RENDER_LANE" =~ ^[a-z0-9-]{1,32}$ ]] && [[ -n "$SOURCE_REPO" && -n "$SOURCE_PATH_PREFIX" ]] || exit 1
-          fi
           args=()
           if [[ "$RETRY_FAILED" == true ]]; then args+=(--retry-failed); fi
-          if [[ "$FORCE_REPROBE" == true ]]; then args+=(--force-reprobe); fi
-          python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --target-render-seconds 1500 --source-repo "$SOURCE_REPO" --source-path-prefix "$SOURCE_PATH_PREFIX" --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
+           python scripts/pdf_ocr_stages.py plan-render --partition large --native-text-stream --target-render-seconds 1500 --limit "$LIMIT" --checkpoint "$CHECKPOINT" "${args[@]}"
           echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
           echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
@@ -120,7 +87,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 10
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
@@ -128,9 +95,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
-      - run: python -m pip install --retries 10 --timeout 60 -r scripts/requirements.txt
+      - run: pip install -r scripts/requirements.txt
       - name: Install rendering tools
         run: |
           packages=(poppler-utils)
@@ -166,9 +131,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
-      - run: python -m pip install --retries 10 --timeout 60 -r scripts/requirements.txt
+      - run: pip install -r scripts/requirements.txt
       - name: Validate recovery run identity
         if: inputs.recover_run != ''
         env:
@@ -184,26 +147,18 @@ jobs:
           path: output/pdf-ocr
           github-token: ${{ github.token }}
           run-id: ${{ inputs.recover_run || github.run_id }}
-      - name: Download render results at a controlled rate
+      - uses: actions/download-artifact@v8
         if: needs.build.result != 'skipped' || inputs.recover_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RENDER_RUN: ${{ inputs.recover_run || github.run_id }}
-        run: python scripts/download_pdf_render_results.py --repo "${{ github.repository }}" --run-id "$RENDER_RUN" --output output/pdf-ocr/results
+        with:
+          pattern: pdf-render-results-*
+          path: output/pdf-ocr/results
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recover_run || github.run_id }}
       - name: Publish complete image inputs and Reader streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          PROGRESS_ONLY: ${{ inputs.recover_progress_only || 'false' }}
-          RECOVER_RUN: ${{ inputs.recover_run || '' }}
-        run: |
-          args=()
-          if [[ "$PROGRESS_ONLY" == true ]]; then
-            test -n "$RECOVER_RUN"
-            args+=(--recover-progress-only)
-          fi
-          python scripts/pdf_ocr_stages.py publish-render --results-dir output/pdf-ocr/results "${args[@]}"
+        run: python scripts/pdf_ocr_stages.py publish-render --results-dir output/pdf-ocr/results
       - name: Publish Reader sidecar to Pages
-        if: inputs.recover_progress_only != true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}

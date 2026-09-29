@@ -18,7 +18,7 @@ except ImportError:
     from pdf_range_state import apply_optimized
 
 STATUS = {"ready": 2, "failed": 4}
-MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "audio": "a", "video": "v"}
+MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "text": "t", "markdown": "k", "image": "i", "audio": "a", "video": "v"}
 
 
 def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest: dict | None = None,
@@ -30,7 +30,11 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None, range_manifest
             continue
         compact = {"s": STATUS[status]}
         if status == "ready":
+            if entry.get("bucket_staging"):
+                continue
             compact.update({"m": MODE[entry["reader_mode"]], "p": entry["path"]})
+            if entry.get("bucket") and not (entry["reader_mode"] == "pdf" and entry["path"].endswith("/document.pdf")):
+                compact["b"] = entry["bucket"]
             if entry.get("chapter_manifest"):
                 compact["c"] = entry["chapter_manifest"]
                 if entry.get("chapter_bucket"):

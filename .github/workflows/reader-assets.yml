@@ -11,17 +11,12 @@ on:
         default: ""
         type: string
       extension:
-        description: pdf, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, or blank
+        description: txt, md, markdown, jpg, jpeg, png, gif, bmp, webp, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, or blank
         required: false
         default: ""
         type: string
       path:
         description: Exact source path within the dataset, or blank for all
-        required: false
-        default: ""
-        type: string
-      path_prefix:
-        description: Source folder prefix within the dataset, or blank for all
         required: false
         default: ""
         type: string
@@ -44,6 +39,16 @@ on:
         description: Rebuild even when the current asset is ready
         required: false
         default: false
+        type: boolean
+      bucket_migrate:
+        description: Publish final static Reader artifacts to the existing pdf-pages bucket (PDF/OCR and ebook chapter flows stay on their dedicated pipelines)
+        required: false
+        default: true
+        type: boolean
+      bucket_pdf_staging:
+        description: Also convert PDF-producing formats into bucket staging PDFs; leave disabled while PDF render/OCR is paused
+        required: false
+        default: true
         type: boolean
       dry_run:
         description: Scan only; do not download, convert, or publish
@@ -102,7 +107,6 @@ jobs:
           INPUT_REPO: ${{ inputs.repo || '' }}
           INPUT_EXTENSION: ${{ inputs.extension || '' }}
           INPUT_PATH: ${{ inputs.path || '' }}
-          INPUT_PATH_PREFIX: ${{ inputs.path_prefix || '' }}
         run: |
           retry_reader_command() {
             local attempt delay
@@ -117,18 +121,19 @@ jobs:
           [[ "${PER_SHARD_LIMIT}" =~ ^[0-9]+$ ]] && ((10#${PER_SHARD_LIMIT} >= 1 && 10#${PER_SHARD_LIMIT} <= 100)) || { echo "limit must be between 1 and 100" >&2; exit 1; }
           [[ "${CHECKPOINT_BATCHES}" =~ ^[0-9]+$ ]] && ((10#${CHECKPOINT_BATCHES} >= 1 && 10#${CHECKPOINT_BATCHES} <= 100)) || { echo "checkpoint_batches must be between 1 and 100" >&2; exit 1; }
           [[ "${COMMAND_TIMEOUT}" =~ ^[0-9]+$ ]] && ((10#${COMMAND_TIMEOUT} >= 30 && 10#${COMMAND_TIMEOUT} <= 7200)) || { echo "command_timeout must be between 30 and 7200" >&2; exit 1; }
-          total_limit=$((10 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))
+          total_limit=$((20 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))
           args=(
             --repo "${INPUT_REPO}"
             --extension "${INPUT_EXTENSION}"
             --path "${INPUT_PATH}"
-            --path-prefix "${INPUT_PATH_PREFIX}"
             --limit "${total_limit}"
           )
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
+          if [[ "${{ inputs.bucket_migrate }}" == "true" ]]; then args+=(--bucket-migrate); fi
+          if [[ "${{ inputs.bucket_pdf_staging }}" == "true" ]]; then args+=(--bucket-pdf-staging); fi
           retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
-           python scripts/prepare_reader_assets_plan.py
+          python scripts/prepare_reader_assets_plan.py
       - name: Package conversion plan
         if: inputs.dry_run != true
         run: tar -czf output/reader-assets/plan.tgz output/search_data.json state/commits.json output/reader-assets/snapshot.json output/reader-assets/queue-*.json
@@ -150,7 +155,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 20
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
@@ -172,6 +177,7 @@ jobs:
         run: |
           packages=()
           case "${EXTENSION}" in
+            static) packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
             pdf) packages=(qpdf poppler-utils) ;;
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice qpdf fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
@@ -216,7 +222,7 @@ jobs:
           BATCH_SIZE: ${{ inputs.limit || '20' }}
           CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ inputs.force == true && '1' || '10' }}
+          SHARD_COUNT: ${{ inputs.force == true && '1' || '20' }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
           SOURCE_PATH: ${{ inputs.path || '' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}

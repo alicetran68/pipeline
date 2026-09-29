@@ -298,6 +298,14 @@ class PdfAssetsTests(unittest.TestCase):
                 {"page": 1, "path": "objects/aa/book/pages/wrong.webp"},
             ])
 
+    def test_page_manifest_carries_ocr_page_references(self):
+        pages = [{"page": 1, "path": "objects/aa/book/pages/page-000001.webp",
+                  "sha256": "a", "bytes": 1}]
+        ocr = [{"page": 1, "o": "objects/aa/" + "c" * 64 + "/ocr-profile/ocr/page-000001.json.gz",
+                "os": "d" * 64, "ob": 20}]
+        manifest = pdf_assets.compact_page_manifest("c" * 64, "profile", pages, ocr_pages=ocr)
+        self.assertEqual(manifest["ocr"], [{"p": 1, "o": ocr[0]["o"], "os": "d" * 64, "ob": 20}])
+
     def test_range_risk_candidate_allows_scan_pdf_below_large_threshold(self):
         self.assertLess(pdf_assets.RISK_PDF_MIN_BYTES, pdf_assets.LARGE_BYTES)
         self.assertTrue(pdf_assets.RISK_PDF_MIN_PAGES >= 300)

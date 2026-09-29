@@ -38,11 +38,3 @@ jobs:
           args=()
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python scripts/publish_lin_native_text.py --path "$SOURCE_PATH" "${args[@]}"
-      - name: Publish Reader sidecar to Pages
-        if: inputs.dry_run != true
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
-          PAGES_REPO: ${{ secrets.PAGES_REPO }}
-          READER_ASSETS_REPO: vomebook/Reader-Assets
-        run: python scripts/publish_search_reader_index.py

@@ -5,8 +5,10 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from . import shared
+    from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
 except ImportError:
     import shared
+    from reader_bucket import INDEX_FILES, read_json as read_bucket_json
 
 MANIFEST_NAME = "pdf_range_manifest.json"
 
@@ -25,6 +27,14 @@ def has_legacy_artifacts(state: dict) -> bool:
 
 
 def remote_state(api, repo, revision=None):
+    if type(api).__name__ == "HfApi":
+        try:
+            state = read_bucket_json(INDEX_FILES["range"])
+            if state.get("version") != 1 or not isinstance(state.get("files"), dict):
+                raise ValueError("invalid PDF range assessment state")
+            return state
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=MANIFEST_NAME,
                                    revision=revision)
@@ -39,20 +49,7 @@ def remote_state(api, repo, revision=None):
 
 
 def apply_optimized(files, manifest, state):
-    for key, entry in (state or {}).get("files", {}).items():
-        if entry.get("status") != "optimized":
-            continue
-        base = manifest.get("files", {}).get(key, {})
-        if entry.get("source_kind") == "generated":
-            if (base.get("status") != "ready" or base.get("reader_mode") != "pdf"
-                    or base.get("sha256") != entry.get("input_sha256")
-                    or base.get("profile") != entry.get("input_profile")):
-                continue
-        elif base.get("status") == "ready":
-            # A new conversion/repair is authoritative over an older raw source.
-            continue
-        path = entry.get("path", "")
-        if path.startswith("objects/") and path.endswith("/document.pdf") and ".." not in path.split("/"):
-            files[key] = {"s": 2, "m": "p", "p": path}
-            if artifact_bucket(state or {}, entry) == shared.PDF_RANGE_BUCKET:
-                files[key]["b"] = shared.PDF_RANGE_BUCKET
+    # PDF structure optimization is retired. Page streams/OCR are the only
+    # generated PDF delivery route; assessment state remains historical data
+    # until the dedicated optimized bucket is retired.
+    return

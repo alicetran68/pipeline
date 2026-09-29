@@ -13,13 +13,15 @@ import tempfile
 import time
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from .reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
+    from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
 except ImportError:
     from reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
+    from reader_bucket import INDEX_FILES, read_json as read_bucket_json
 
 try:
     from . import shared
@@ -73,7 +75,8 @@ def object_root(source_sha: str, key: str) -> Path:
 
 
 def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
-                          toc: list[dict] | None = None, manifest_dir: Path | None = None) -> dict:
+                          toc: list[dict] | None = None, manifest_dir: Path | None = None,
+                          ocr_pages: list[dict] | None = None) -> dict:
     if not pages:
         raise ValueError("PDF page manifest must contain at least one page")
     manifest_dir = manifest_dir or Path(str(pages[0].get("path") or "")).parent.parent
@@ -90,6 +93,20 @@ def compact_page_manifest(source_sha: str, profile: str, pages: list[dict],
     }
     if toc:
         manifest["toc"] = toc
+    if ocr_pages is not None:
+        if len(ocr_pages) != len(pages):
+            raise ValueError("PDF OCR page manifest must match image page count")
+        checked = []
+        for number, page in enumerate(ocr_pages, 1):
+            path = page.get("o")
+            if (page.get("page") != number or not isinstance(path, str)
+                    or not path.endswith(f"/ocr/page-{number:06d}.json.gz")
+                    or not isinstance(page.get("os"), str)
+                    or len(page["os"]) != 64
+                    or not isinstance(page.get("ob"), int) or page["ob"] <= 0):
+                raise ValueError("invalid PDF OCR page reference")
+            checked.append({"p": number, "o": path, "os": page["os"], "ob": page["ob"]})
+        manifest["ocr"] = checked
     return manifest
 
 
@@ -191,6 +208,7 @@ def load_generated_records(manifest: Path | dict, assets_repo: str = READER_ASSE
             "source_extension": Path(source_path).suffix.lower().lstrip("."),
             "source_kind": "generated", "profile": SOURCE_PROFILES["generated"],
             "reader_assets_repo": assets_repo, "reader_assets_path": artifact,
+            "reader_assets_bucket": entry.get("bucket", ""),
             "reader_assets_revision": assets_revision,
         })
     selected.sort(key=lambda item: (0 if item.get("source_extension") in {"caj", "kdh"} else 1,
@@ -400,6 +418,11 @@ def build_publish(manifest: dict, results: list[dict], bundle: Path) -> tuple[di
 
 
 def remote_manifest(api: HfApi, repo: str) -> dict:
+    if type(api) is HfApi:
+        try:
+            return read_bucket_json(INDEX_FILES["pdf"], os.environ.get("HF_TOKEN"))
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=MANIFEST_NAME)
     except HfHubHTTPError as exc:
@@ -410,6 +433,13 @@ def remote_manifest(api: HfApi, repo: str) -> dict:
 
 
 def failed_source_keys(api: HfApi, repo: str, extension: str) -> set[str]:
+    if type(api) is HfApi:
+        try:
+            manifest = read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN"))
+            return {key for key, entry in manifest.get("files", {}).items()
+                    if entry.get("status") == "failed" and entry.get("source_extension") == extension}
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="manifest.json")
     except HfHubHTTPError as exc:
@@ -494,15 +524,27 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
         if not include_artifacts:
             operations = [operation for operation in operations
                           if operation.path_in_repo in {MANIFEST_NAME, "reader_assets.json.gz"}]
+        index_sidecar = update_sidecar(sidecar, results)
         operations.append(CommitOperationAdd(
             path_in_repo="reader_assets.json.gz",
-            path_or_fileobj=update_sidecar(sidecar, results),
+            path_or_fileobj=index_sidecar,
         ))
         try:
             api.create_commit(
                 repo_id=repo, repo_type="dataset", operations=operations,
                 commit_message="Publish independent PDF asset", parent_commit=info.sha,
             )
+            if type(api) is HfApi and os.environ.get("HF_TOKEN"):
+                with tempfile.TemporaryDirectory(prefix="pdf-index-") as root:
+                    index_root = Path(root) / "reader-index"
+                    index_root.mkdir(parents=True, exist_ok=True)
+                    (index_root / "pdf_manifest.json").write_text(
+                        json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    (index_root / "reader_assets.json.gz").write_bytes(index_sidecar)
+                    sync_bucket(root, "hf://buckets/vomebook/pdf-pages",
+                                 include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
             return
         except HfHubHTTPError as exc:
             if not shared.is_retryable_hf_status(shared.hf_status_code(exc)):

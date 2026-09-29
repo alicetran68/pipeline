@@ -12,8 +12,10 @@ from huggingface_hub import HfApi
 
 try:
     from .reader_assets import READER_ASSETS_REPO
+    from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
 except ImportError:
     from reader_assets import READER_ASSETS_REPO
+    from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
 
 SIDECAR_NAME = "reader_assets.json.gz"
 
@@ -79,15 +81,30 @@ def main() -> int:
     if not hf_token:
         raise RuntimeError("HF_TOKEN is required")
     api = HfApi(token=hf_token)
-    source = Path(api.hf_hub_download(
-        repo_id=args.assets_repo, repo_type="dataset", filename=SIDECAR_NAME,
-    ))
+    source = None
+    temporary_source = False
+    if type(api) is HfApi:
+        try:
+            with tempfile.NamedTemporaryFile(prefix="reader-index-", suffix=".gz", delete=False) as handle:
+                handle.write(read_bucket_bytes(INDEX_FILES["sidecar"], hf_token))
+                source = Path(handle.name)
+                temporary_source = True
+        except (FileNotFoundError, OSError, ValueError):
+            source = None
+    if source is None:
+        source = Path(api.hf_hub_download(
+            repo_id=args.assets_repo, repo_type="dataset", filename=SIDECAR_NAME,
+        ))
     if not source.is_file() or source.stat().st_size == 0:
         raise RuntimeError("Reader Assets sidecar is empty")
-    publish_to_pages(
-        source, os.environ.get("PAGES_REPO", ""), os.environ.get("PAGES_TOKEN", ""),
-        dry_run=args.dry_run,
-    )
+    try:
+        publish_to_pages(
+            source, os.environ.get("PAGES_REPO", ""), os.environ.get("PAGES_TOKEN", ""),
+            dry_run=args.dry_run,
+        )
+    finally:
+        if temporary_source:
+            source.unlink(missing_ok=True)
     print("validated reader assets index" if args.dry_run else "published reader assets index to GitHub Pages")
     return 0
 

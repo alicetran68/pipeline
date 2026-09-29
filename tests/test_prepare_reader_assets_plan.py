@@ -31,6 +31,27 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
     def test_script_imports_when_executed_from_scripts_directory(self):
         self.assertTrue(prepare_reader_assets_plan.scan_reader_assets)
 
+    def test_bucket_migration_keeps_the_mixed_static_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "queue.json"
+            output.write_text(json.dumps({
+                "items": [
+                    {"extension": "docx", "key": "a"},
+                    {"extension": "md", "key": "b"},
+                    {"extension": "png", "key": "c"},
+                ],
+                "bucket_migration": True,
+                "stale_keys": [],
+                "authoritative_snapshot": False,
+            }))
+            with patch.object(prepare_reader_assets_plan, "scan_reader_assets") as scanner:
+                scanner.shard_for_key.return_value = 0
+                with patch.dict(os.environ, {"FORCE_REBUILD": "true", "INPUT_PATH": ""}, clear=False):
+                    extension, count, _, authoritative = prepare_reader_assets_plan.prepare(output)
+            self.assertEqual((extension, count, authoritative), ("static", 3, False))
+            self.assertEqual(len(json.loads((root / "queue.json").read_text())["items"]), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

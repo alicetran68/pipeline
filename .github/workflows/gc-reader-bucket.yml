@@ -1,25 +1,25 @@
-name: Prune Reader Assets
+name: GC Reader Bucket
 
 on:
   schedule:
-    - cron: "43 3 * * *"
+    - cron: "13 4 * * *"
   workflow_dispatch:
     inputs:
       apply:
-        description: Delete eligible objects after reporting them
+        description: Delete only staging objects whose consumers completed
         required: true
         default: false
         type: boolean
-      grace_days:
-        description: Days an object must remain unreferenced
-        required: true
-        default: "14"
-        type: string
       limit:
-        description: Maximum objects deleted in one run
+        description: Maximum staging objects deleted in one run
         required: true
         default: "1000"
         type: string
+      include_input_bucket:
+        description: Scan melsm PNG/JXL objects; enable only after their migration is complete
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-assets
@@ -27,7 +27,7 @@ concurrency:
   queue: max
 
 jobs:
-  prune:
+  gc:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -35,10 +35,11 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
-      - name: Report and collect unreferenced bucket objects
+      - name: Collect completed staging objects
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--grace-days "${{ inputs.grace_days || '14' }}" --limit "${{ inputs.limit || '1000' }}")
+          args=(--limit "${{ inputs.limit || '1000' }}")
+          if [[ "${{ inputs.include_input_bucket }}" == "true" ]]; then args+=(--include-input-bucket); fi
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"

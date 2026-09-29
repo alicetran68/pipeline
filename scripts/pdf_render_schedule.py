@@ -10,7 +10,6 @@ except ImportError:
 
 DEFAULT_PAGE_SECONDS = 3.0
 MAX_RENDER_SHARDS = 256
-MIN_RENDER_SHARDS = 18
 
 
 def finite_seconds(value, positive=False):
@@ -88,15 +87,12 @@ def task_seconds(task):
     return (task["end"] - task["start"] + 1) * rate + setup
 
 
-def balance(tasks, target_seconds, minimum_shards=1):
+def balance(tasks, target_seconds):
     target = finite_seconds(target_seconds, positive=True)
     if target is None:
         raise ValueError("render target seconds must be finite and positive")
-    if isinstance(minimum_shards, bool) or not isinstance(minimum_shards, int) or minimum_shards < 1:
-        raise ValueError("minimum render shards must be a positive integer")
     if not tasks:
         return []
-    count = min(MAX_RENDER_SHARDS, len(tasks), max(minimum_shards,
-                                                    math.ceil(sum(map(task_seconds, tasks)) / target)))
+    count = min(MAX_RENDER_SHARDS, len(tasks), max(1, math.ceil(sum(map(task_seconds, tasks)) / target)))
     return shared.weighted_shards(tasks, count, weight=task_seconds,
                                   order=lambda t: (-task_seconds(t), t["key"], t["start"]))

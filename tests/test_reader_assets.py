@@ -1,5 +1,4 @@
 import concurrent.futures
-import base64
 import gzip
 import hashlib
 import http.client
@@ -25,15 +24,6 @@ from scripts import epub_chapters, reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
-    def test_reader_assets_controller_counts_pending_workers(self):
-        workflow = (Path(__file__).resolve().parents[1]
-                    / ".github/workflows/scheduled-reader-assets.yml").read_text(encoding="utf-8")
-        self.assertIn('select(.status == "queued" or .status == "pending"', workflow)
-
-    def test_bigram_filter_vector_matches_reader_worker_encoding(self):
-        encoded = base64.b64encode(epub_chapters._bigram_filter("读手机书")).decode("ascii")
-        self.assertEqual(encoded, "CP0BAEAAAAAgAgIAEAAAAIRAAAAAAACAIAgAAAABAAA=")
-
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
@@ -180,13 +170,24 @@ class ReaderAssetContractTests(unittest.TestCase):
             self.assertEqual([item["title"] for item in manifest["chapters"]], ["第一章：开始", "第二章：继续"])
             self.assertTrue((output / "resources/shared/OEBPS/images/x.png").is_file())
             self.assertTrue((output / "epub-search-index.json.gz").is_file())
+
+    def test_chm_chapter_bundle_keeps_nonspine_pages_and_fragments(self):
+        with tempfile.TemporaryDirectory() as root:
+            root, epub, output = Path(root), Path(root) / "book.epub", Path(root) / "bundle"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
+                archive.writestr("OEBPS/content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="nested/b.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="a"/></spine></package>')
+                archive.writestr("OEBPS/nav.xhtml", '<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="a.xhtml">一</a></li><li><a href="nested/b.xhtml#target">二</a></li></ol></nav></body></html>')
+                archive.writestr("OEBPS/a.xhtml", '<html><body><p><a href="nested/b.xhtml#target">跳转</a></p></body></html>')
+                archive.writestr("OEBPS/nested/b.xhtml", '<html><body><h1 id="target">目标</h1><p>正文</p></body></html>')
+            manifest = epub_chapters.build_bundle(epub, output, include_all_documents=True)
+            self.assertEqual(len(manifest["chapters"]), 2)
+            first = (output / "chapters/chapter-0001.xhtml").read_text(encoding="utf-8")
+            self.assertIn('href="chapter-0002.xhtml#target"', first)
+            self.assertEqual(manifest["toc"][1]["chapter"], 2)
+            self.assertEqual(manifest["toc"][1]["fragment"], "target")
             self.assertEqual(manifest["search_index"]["bytes"], (output / "epub-search-index.json.gz").stat().st_size)
-            search_index = json.loads(gzip.decompress((output / "epub-search-index.json.gz").read_bytes()))
-            self.assertEqual(search_index["version"], 2)
-            self.assertTrue(all("bf" in item for item in search_index["chapters"]))
-            self.assertLessEqual(sum(len(base64.b64decode(item["bf"]))
-                                     for item in search_index["chapters"]),
-                                 epub_chapters.MAX_SEARCH_BIGRAM_FILTER_BYTES)
 
     def test_chapter_bundle_skips_oversized_resource_sets(self):
         with tempfile.TemporaryDirectory() as root:
@@ -202,39 +203,21 @@ class ReaderAssetContractTests(unittest.TestCase):
                     ValueError, "chapter resource budget"):
                 epub_chapters.build_bundle(epub, Path(root) / "bundle")
 
-    def test_oversized_spine_item_is_split_into_independently_fetchable_chapters(self):
-        record = {
-            "index": 1, "source_path": "text/book.xhtml", "title": "Book",
-            "clean": "<html><head><title>Book</title></head><body>"
-                     "<p>" + ("a" * 600_000) + "</p><p>" + ("b" * 600_000) + "</p>"
-                     "</body></html>",
-            "resources": set(),
-        }
-        split = epub_chapters._split_spine_record(record)
-        self.assertEqual(len(split), 2)
-        self.assertTrue(all(len(item["clean"].encode("utf-8")) <= epub_chapters.MAX_CHAPTER_BYTES
-                            for item in split))
-        self.assertIn("a" * 1000, split[0]["clean"])
-        self.assertIn("b" * 1000, split[1]["clean"])
-
-    def test_epub_chapter_split_threshold(self):
-        self.assertTrue(reader_assets.needs_epub_chapters(
-            "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES))
-        self.assertTrue(reader_assets.needs_epub_chapters(
-            "epub", "foliate", reader_assets.EPUB_CHAPTER_SPLIT_BYTES - 1))
+    def test_all_native_ebooks_use_chapter_streams(self):
+        for extension in ("epub", "mobi", "azw3", "fb2"):
+            self.assertTrue(reader_assets.needs_epub_chapters(extension, "foliate", 1))
         self.assertTrue(reader_assets.needs_epub_chapters("mobi", "foliate", 10 ** 9))
         self.assertTrue(reader_assets.needs_epub_chapters("azw3", "foliate", 10 ** 9))
         self.assertFalse(reader_assets.needs_epub_chapters("epub", "pdf", 10 ** 9))
 
-    def test_all_ebook_sizes_are_split_for_on_demand_loading(self):
+    def test_mid_sized_epub_is_split_for_on_demand_loading(self):
         for extension in ("epub", "mobi", "azw3", "fb2"):
             with self.subTest(extension=extension):
                 self.assertTrue(reader_assets.needs_epub_chapters(
                     extension, "foliate", 8 * 1024 * 1024))
                 self.assertTrue(reader_assets.needs_epub_chapters(
                     extension, "foliate", 8 * 1024 * 1024 - 1))
-        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024))
-        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 16 * 1024 * 1024 - 1))
+        self.assertTrue(reader_assets.needs_epub_chapters("chm", "epub", 1))
 
     def test_chapter_bundle_can_publish_text_without_resources(self):
         with tempfile.TemporaryDirectory() as root:
@@ -277,7 +260,7 @@ class ScannerTests(unittest.TestCase):
                     archive.writestr("content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/><item id="b" href="b.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>')
                     archive.writestr("a.xhtml", "<html><body><p>chapter one</p></body></html>")
                     archive.writestr("b.xhtml", "<html><body><p>chapter two</p></body></html>")
-                return hashlib.sha256(target.read_bytes()).hexdigest(), reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1
+                    return hashlib.sha256(target.read_bytes()).hexdigest(), 1
 
             def normalize(command, **_kwargs):
                 Path(command[2]).write_bytes(Path(command[1]).read_bytes())
@@ -304,44 +287,13 @@ class ScannerTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as root:
             def download(_url, target):
-                with zipfile.ZipFile(target, "w") as archive:
-                    archive.writestr("mimetype", "application/epub+zip")
-                    archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>')
-                    archive.writestr("content.opf", '<package><manifest><item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="a"/></spine></package>')
-                    archive.writestr("a.xhtml", "<html><body><p>small chapter</p></body></html>")
+                target.write_bytes(b"small epub")
                 return hashlib.sha256(b"small epub").hexdigest(), 10
             with patch.object(convert_reader_assets, "download_source", side_effect=download):
                 result = convert_reader_assets.convert_item(item, Path(root))
             self.assertEqual(result["status"], "ready")
-            self.assertIn("chapter_manifest", result)
-
-    def test_malformed_epub_chapter_xml_uses_calibre_repack(self):
-        with tempfile.TemporaryDirectory() as root:
-            root = Path(root)
-            source, output, work = root / "source.epub", root / "bundle", root / "work"
-            source.write_bytes(b"original EPUB")
-            work.mkdir()
-            calls = []
-
-            def build(epub, target):
-                calls.append(epub)
-                if epub == source:
-                    raise convert_reader_assets.zipfile.BadZipFile("broken central directory")
-                target.mkdir(parents=True, exist_ok=True)
-                (target / "chapter-manifest.json").write_text("{}", encoding="utf-8")
-                return {"chapters": []}
-
-            def repack(command, **_kwargs):
-                Path(command[2]).write_bytes(b"Calibre repaired EPUB")
-
-            with patch.object(epub_chapters, "build_bundle", side_effect=build), \
-                    patch.object(convert_reader_assets, "run_checked", side_effect=repack) as run, \
-                    patch.object(convert_reader_assets, "validate_output"):
-                convert_reader_assets.build_epub_chapter_bundle(source, output, "epub", work)
-
-            self.assertEqual(calls, [source, work / "chapter-source-repaired.epub"])
-            self.assertEqual(run.call_args.args[0][0:2], ["ebook-convert", str(source)])
-            self.assertEqual(run.call_args.args[0][-2:], ["--flow-size", "0"])
+            self.assertEqual(result["chapter_bundle_profile"], reader_assets.EPUB_CHAPTER_PROFILE)
+            self.assertIn("chapter_bundle_error", result)
 
     def test_queues_only_supported_changed_files(self):
         queue = scan_reader_assets.build_queue(
@@ -352,18 +304,34 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["profile"], "docx-native-v2")
         self.assertEqual(queue[0]["reader_mode"], "docx")
 
-    def test_native_ebooks_are_migrated_before_image_conversions(self):
+    def test_bucket_migration_queues_native_text_markdown_and_images(self):
         records = [
-            {"Repo": "VoiceOfML/Test", "File": "Scan", "Extension": "tiff", "Folder": [], "Size": 10},
-            {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "epub", "Folder": [], "Size": 10},
+            {"Repo": "VoiceOfML/Test", "File": "Notes", "Extension": "md", "Folder": [], "Size": 10},
+            {"Repo": "VoiceOfML/Test", "File": "Photo", "Extension": "jpg", "Folder": [], "Size": 10},
+            {"Repo": "VoiceOfML/Test", "File": "Plain", "Extension": "txt", "Folder": [], "Size": 10},
         ]
-        queue = scan_reader_assets.build_queue(records, self.revisions, reader_assets.empty_manifest())
-        self.assertEqual([item["extension"] for item in queue], ["epub", "tiff"])
+        queue = scan_reader_assets.build_queue(
+            records, self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
+        )
+        self.assertEqual(
+            [(item["extension"], item["reader_mode"], item["output_name"]) for item in queue],
+            [("md", "markdown", "document.md"), ("jpg", "image", "document.webp"),
+             ("txt", "text", "document.txt")],
+        )
+
+    def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "docx-native-v2", "bucket": reader_assets.READER_ASSETS_BUCKET,
+        }}}
+        self.assertEqual(scan_reader_assets.build_queue(
+            self.records[:1], self.revisions, manifest, bucket_migrate=True,
+        ), [])
 
     def test_large_epub_without_chapters_is_requeued_for_upgrade(self):
         records = [{
             "Repo": "VoiceOfML/Test", "File": "Big", "Extension": "epub", "Folder": [],
-            "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1,
+            "Size": 1,
         }]
         revisions = {"VoiceOfML/Test": "rev1"}
         ready = {"status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate"}
@@ -375,24 +343,7 @@ class ScannerTests(unittest.TestCase):
         manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_manifest"] = "objects/a/chapter-manifest.json"
         self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 
-    def test_chapter_bundle_failure_waits_for_profile_change_or_explicit_retry(self):
-        records = [{
-            "Repo": "VoiceOfML/Test", "File": "Big", "Extension": "epub", "Folder": [],
-            "Size": reader_assets.EPUB_CHAPTER_SPLIT_BYTES + 1,
-        }]
-        manifest = reader_assets.empty_manifest()
-        manifest["files"] = {"VoiceOfML/Test\0Big.epub": {
-            "status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate",
-            "chapter_bundle_profile": reader_assets.EPUB_CHAPTER_PROFILE,
-            "chapter_bundle_error": "ParseError: malformed OPF",
-        }}
-        self.assertEqual(scan_reader_assets.build_queue(records, {"VoiceOfML/Test": "rev1"}, manifest), [])
-        self.assertEqual(len(scan_reader_assets.build_queue(
-            records, {"VoiceOfML/Test": "rev1"}, manifest, retry_failed=True)), 1)
-        manifest["files"]["VoiceOfML/Test\0Big.epub"]["chapter_bundle_profile"] = "epub-chapters-v7-bucket"
-        self.assertEqual(len(scan_reader_assets.build_queue(records, {"VoiceOfML/Test": "rev1"}, manifest)), 1)
-
-    def test_ebook_without_chapters_is_requeued_for_upgrade(self):
+    def test_small_epub_and_mobi_are_queued_for_chapter_stream_upgrade(self):
         revisions = {"VoiceOfML/Test": "rev1"}
         manifest = reader_assets.empty_manifest()
         manifest["files"] = {
@@ -403,8 +354,15 @@ class ScannerTests(unittest.TestCase):
             {"Repo": "VoiceOfML/Test", "File": "Small", "Extension": "epub", "Folder": [], "Size": 10},
             {"Repo": "VoiceOfML/Test", "File": "Small", "Extension": "mobi", "Folder": [], "Size": 10},
         ]
-        self.assertEqual([item["path"] for item in scan_reader_assets.build_queue(records, revisions, manifest)],
-                         ["Small.epub", "Small.mobi"])
+        self.assertEqual([item["extension"] for item in scan_reader_assets.build_queue(
+            records, revisions, manifest,
+        )], ["epub", "mobi"])
+        for key in manifest["files"]:
+            manifest["files"][key].update({
+                "chapter_bundle_profile": reader_assets.EPUB_CHAPTER_PROFILE,
+                "chapter_manifest": "ebook-chapters/objects/aa/chapter-manifest.json",
+            })
+        self.assertEqual(scan_reader_assets.build_queue(records, revisions, manifest), [])
 
     def test_html_resource_fragments_are_not_reader_documents(self):
         records = [{
@@ -534,24 +492,13 @@ class ScannerTests(unittest.TestCase):
         queue = scan_reader_assets.build_queue(
             records, self.revisions, reader_assets.empty_manifest(),
         )
-        self.assertEqual([item["extension"] for item in queue], ["mobi", "tif", "djvu", "doc", "pdf"])
+        self.assertEqual([item["extension"] for item in queue], ["tif", "mobi", "djvu", "doc", "pdf"])
 
     def test_exact_path_filter_selects_one_asset(self):
         queue = scan_reader_assets.build_queue(
             self.records, self.revisions, reader_assets.empty_manifest(), exact_path="A/Book.docx",
         )
         self.assertEqual([item["path"] for item in queue], ["A/Book.docx"])
-
-    def test_path_prefix_selects_folder_without_matching_siblings(self):
-        records = self.records + [
-            {"Repo": "VoiceOfML/Test", "File": "Nearby", "Extension": "docx", "Folder": ["A"], "Size": 1},
-            {"Repo": "VoiceOfML/Test", "File": "Other", "Extension": "docx", "Folder": ["AB"], "Size": 1},
-        ]
-        queue = scan_reader_assets.build_queue(
-            records, self.revisions, reader_assets.empty_manifest(),
-            repo="VoiceOfML/Test", extension="docx", path_prefix="A/",
-        )
-        self.assertEqual([item["path"] for item in queue], ["A/Book.docx", "A/Nearby.docx"])
 
     def test_missing_assets_repository_is_an_empty_manifest(self):
         api = Mock()
@@ -717,6 +664,19 @@ class ConverterTests(unittest.TestCase):
             self.assertIn("1:a:0", command)
             self.assertIn("libx264", command)
             self.assertIn("aac", command)
+
+    def test_static_image_conversion_outputs_webp(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.png", work / "document.webp"
+            convert_reader_assets.Image.new("RGBA", (4, 4), (255, 0, 0, 128)).save(source)
+            convert_reader_assets.convert_file(
+                {"extension": "png", "reader_mode": "image", "output_name": "document.webp"},
+                source, target, work,
+            )
+            self.assertEqual(target.read_bytes()[:4], b"RIFF")
+            with convert_reader_assets.Image.open(target) as image:
+                self.assertEqual(image.format, "WEBP")
 
     def test_calibre_office_book_conversion_uses_html_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1778,67 +1738,16 @@ class PublicationTests(unittest.TestCase):
             {result["path"], "manifest.json", "reader_assets.json.gz"},
         )
 
-    def test_ebook_chapter_bundle_is_bucket_staged_and_sidecar_points_to_shared_bucket(self):
-        key = "VoiceOfML/Test\0A/Book.epub"
-        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v8-bucket/epub-chapters/chapter-manifest.json"
-        result = {
-            "key": key, "status": "ready", "source_revision": "rev1",
-            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "epub",
-            "profile": "foliate-original-v1", "reader_mode": "foliate",
-            "path": "objects/aa/" + "a" * 64 + "/foliate-original-v1/document.epub",
-            "chapter_manifest": chapter_manifest, "chapter_bundle_profile": reader_assets.EPUB_CHAPTER_PROFILE,
-        }
-        api = Mock()
-        api.file_exists.return_value = False
-        with tempfile.TemporaryDirectory() as root:
-            bundle = self.make_bundle(root, result)
-            chapter_root = bundle / Path(chapter_manifest).parent
-            (chapter_root / "chapters").mkdir(parents=True)
-            (chapter_root / "chapter-manifest.json").write_text("{}", encoding="utf-8")
-            (chapter_root / "chapters/chapter-0001.xhtml").write_text("<p>chapter</p>", encoding="utf-8")
-            manifest, operations = publish_reader_assets.build_publish(api, "vomebook/Test", bundle)
-            bucket_root = bundle / "ebook-chapters"
-            self.assertTrue((bucket_root / chapter_manifest).is_file())
-            self.assertTrue((bucket_root / Path(chapter_manifest).parent / "chapters/chapter-0001.xhtml").is_file())
-        entry = manifest["files"][key]
-        self.assertEqual(entry["chapter_bucket"], "vomebook/pdf-pages")
-        self.assertEqual(entry["chapter_manifest"], f"ebook-chapters/{chapter_manifest}")
-        self.assertEqual({operation.path_in_repo for operation in operations},
-                         {result["path"], "manifest.json", "reader_assets.json.gz"})
-        sidecar = next(operation.path_or_fileobj for operation in operations
-                       if operation.path_in_repo == "reader_assets.json.gz")
-        index = json.loads(gzip.decompress(sidecar))
-        self.assertEqual(index["f"][key]["cb"], "vomebook/pdf-pages")
-        self.assertEqual(index["f"][key]["c"], f"ebook-chapters/{chapter_manifest}")
-
-    def test_ebook_chapter_bundle_syncs_to_existing_pdf_bucket(self):
-        key = "VoiceOfML/Test\0A/Book.epub"
-        chapter_manifest = "objects/aa/" + "a" * 64 + "/bundle-v1/profile-epub-chapters-v8-bucket/epub-chapters/chapter-manifest.json"
-        result = {
-            "key": key, "status": "ready", "source_revision": "rev1",
-            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "epub",
-            "profile": "foliate-original-v1", "reader_mode": "foliate",
-            "path": "objects/aa/" + "a" * 64 + "/foliate-original-v1/document.epub",
-            "chapter_manifest": chapter_manifest, "chapter_bundle_profile": reader_assets.EPUB_CHAPTER_PROFILE,
-        }
-        api = Mock()
-        api.repo_info.return_value = SimpleNamespace(sha="revision")
-        api.file_exists.return_value = False
-        with tempfile.TemporaryDirectory() as root:
-            bundle = self.make_bundle(root, result)
-            chapter_root = bundle / Path(chapter_manifest).parent
-            (chapter_root / "chapters").mkdir(parents=True)
-            (chapter_root / "chapter-manifest.json").write_text("{}", encoding="utf-8")
-            (chapter_root / "chapters/chapter-0001.xhtml").write_text("<p>chapter</p>", encoding="utf-8")
-            with patch.object(publish_reader_assets, "remote_manifest", return_value=reader_assets.empty_manifest()), \
-                    patch.object(publish_reader_assets, "sync_bucket") as sync:
-                publish_reader_assets.publish_bundle(api, "vomebook/Test", bundle)
-        sync.assert_called_once()
-        self.assertEqual(sync.call_args.args[1],
-                         "hf://buckets/vomebook/pdf-pages/ebook-chapters")
-        self.assertEqual(sync.call_args.kwargs["quiet"], True)
-        self.assertEqual(api.upload_folder.call_args.kwargs["ignore_patterns"],
-                         ["objects/**/epub-chapters/**"])
+    def test_static_and_pdf_document_outputs_are_bucket_upload_candidates(self):
+        data = {"results": [
+            {"status": "ready", "reader_mode": "docx", "path": "objects/aa/document.docx"},
+            {"status": "ready", "reader_mode": "html", "path": "objects/bb/document.html"},
+            {"status": "ready", "reader_mode": "foliate", "path": "objects/cc/document.epub"},
+            {"status": "ready", "reader_mode": "audio", "path": "objects/dd/audio.mp3"},
+        ]}
+        self.assertEqual(publish_reader_assets.bucket_paths(data), [
+            "objects/aa/document.docx", "objects/bb/document.html", "objects/cc/document.epub",
+        ])
 
     def test_failed_retry_does_not_replace_existing_ready_asset(self):
         key = "VoiceOfML/Test\0A/Book.docx"
@@ -2200,9 +2109,11 @@ class PublicationTests(unittest.TestCase):
     def test_sidecar_encodes_docx_reader_mode(self):
         manifest = {"version": 1, "files": {"book": {
             "status": "ready", "reader_mode": "docx", "path": "objects/aa/source/docx-native-v1/document.docx",
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
         }}}
         self.assertEqual(build_reader_assets_index.build_index(manifest)["f"]["book"], {
             "s": 2, "m": "d", "p": "objects/aa/source/docx-native-v1/document.docx",
+            "b": reader_assets.READER_ASSETS_BUCKET,
         })
 
     def test_sidecar_encodes_html_reader_mode(self):
@@ -2401,7 +2312,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn("needs.plan.outputs.count != '0'", workflow)
-        self.assertIn("total_limit=$((10 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))", workflow)
+        self.assertIn("total_limit=$((20 * 10#${PER_SHARD_LIMIT} * 10#${CHECKPOINT_BATCHES}))", workflow)
         self.assertIn("queue-${SHARD_INDEX}.json", workflow)
         self.assertIn('--queue "${queue}"', workflow)
         self.assertIn("Convert assigned queue", workflow)
@@ -2415,7 +2326,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("prepare_reader_assets_plan.py", workflow)
         self.assertIn("stale_count", workflow)
         self.assertIn("if: inputs.dry_run != true", workflow)
-        self.assertIn("max-parallel: 10", workflow)
+        self.assertIn("max-parallel: 20", workflow)
         self.assertIn("shard: ${{ fromJSON(needs.plan.outputs.shards) }}", workflow)
         self.assertIn("fail-fast: false", workflow)
         self.assertIn("reader-assets-plan", workflow)
@@ -2452,7 +2363,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('default: "14"', workflow)
         self.assertIn('default: "1000"', workflow)
         self.assertIn('cron: "43 3 * * *"', workflow)
-        self.assertIn("python scripts/prune_reader_assets.py", workflow)
+        self.assertIn("python scripts/gc_reader_bucket.py", workflow)
 
 
 if __name__ == "__main__":

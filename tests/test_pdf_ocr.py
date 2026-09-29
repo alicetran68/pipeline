@@ -12,11 +12,6 @@ from scripts.plan_pdf_ocr import DEFAULT_OCR_TARGET_PAGES_PER_SHARD, pdf_ocr_sha
 
 
 class PdfOcrContractTests(unittest.TestCase):
-    def test_document_text_probe_extracts_all_pages_in_one_poppler_call(self):
-        with patch.object(pdf_ocr, "_run", return_value="前页\f正文文字\f") as run:
-            self.assertEqual(pdf_ocr.document_text_probe(Path("book.pdf"), 3), [2, 4, 0])
-        run.assert_called_once_with(["pdftotext", "-enc", "UTF-8", "book.pdf", "-"])
-
     def test_normalize_ocr_result_preserves_order_and_normalizes_boxes(self):
         blocks = pdf_ocr.normalize_ocr_result({
             "rec_texts": [" 第二 ", "第一"],

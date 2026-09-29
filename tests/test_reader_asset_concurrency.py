@@ -6,15 +6,6 @@ ROOT = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 
 
 class ReaderAssetConcurrencyTests(unittest.TestCase):
-    def test_reader_assets_controller_continues_on_completion_and_has_cron_fallback(self):
-        import yaml
-        workflow = yaml.safe_load((ROOT / "scheduled-reader-assets.yml").read_text())
-        self.assertIn("schedule", workflow[True])
-        self.assertEqual(workflow[True]["workflow_run"]["workflows"], ["Build Reader Assets"])
-        self.assertEqual(workflow[True]["workflow_run"]["types"], ["completed"])
-        self.assertEqual(workflow["concurrency"]["queue"], "max")
-        self.assertIn("reader-assets.yml", workflow["jobs"]["dispatch"]["steps"][-1]["run"])
-
     def test_all_reader_asset_publishers_share_one_queue(self):
         for filename in (
             "reader-assets.yml", "prune-reader-assets.yml", "pdf-assets-worker.yml",
