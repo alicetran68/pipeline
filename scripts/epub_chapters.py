@@ -216,7 +216,7 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
         if _placeholder_title(title):
             title = _target_title(record["clean"], entry["fragment"], root=documents[entry["source_path"]])
         if _placeholder_title(title):
-            raise ValueError(f'EPUB TOC title cannot be recovered: {entry["source_path"]}#{entry["fragment"]}')
+            continue
         fragment = entry["fragment"]
         root = documents.get(entry["source_path"])
         if fragment and root is not None and not any(
