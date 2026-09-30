@@ -27,6 +27,11 @@ class IndexUnavailable(RuntimeError):
     """The collector cannot prove that the bucket reference graph is complete."""
 
 
+def apply_limit(paths: list[str], limit: int) -> list[str]:
+    """A zero limit means all eligible paths; positive values cap one run."""
+    return sorted(paths) if limit == 0 else sorted(paths)[:limit]
+
+
 def decode_sidecar(raw: bytes) -> dict:
     value = json.loads(gzip.decompress(raw).decode("utf-8"))
     return value if isinstance(value, dict) else {}
@@ -120,7 +125,7 @@ def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool 
             if separator and bucket in expired:
                 expired[bucket].append(object_path)
     for bucket in expired:
-        expired[bucket] = sorted(expired[bucket])[:limit]
+        expired[bucket] = apply_limit(expired[bucket], limit)
     counts = {READER_ASSETS_BUCKET: len(candidates), READER_STAGING_BUCKET: len(staging_files),
               PDF_OCR_INPUT_BUCKET: len(input_files)}
     return updated, expired, counts
@@ -128,14 +133,14 @@ def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--grace-days", type=int, default=14)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--include-input-bucket", action="store_true",
                         help="Also scan the OCR PNG/JXL input bucket after its migration is complete")
     args = parser.parse_args()
-    if args.limit < 1 or args.grace_days < 0:
-        raise ValueError("limit must be positive and grace-days must be non-negative")
+    if args.limit < 0 or args.grace_days < 0:
+        raise ValueError("limit and grace-days must be non-negative")
     token = os.environ.get("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required")

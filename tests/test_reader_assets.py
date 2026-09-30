@@ -19,11 +19,15 @@ from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, pdf_assets, publish_reader_assets
-from scripts import prune_reader_assets, publish_search_reader_index
+from scripts import gc_reader_bucket, prune_reader_assets, publish_search_reader_index
 from scripts import epub_chapters, reader_assets, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
+    def test_bucket_gc_zero_limit_means_unlimited(self):
+        self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 0), ["a", "b", "c"])
+        self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 2), ["a", "b"])
+
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
@@ -2373,7 +2377,7 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
         self.assertIn("group: reader-assets", workflow)
         self.assertIn('default: "14"', workflow)
-        self.assertIn('default: "1000"', workflow)
+        self.assertIn('default: "0"', workflow)
         self.assertIn('cron: "43 3 * * *"', workflow)
         self.assertIn("python scripts/gc_reader_bucket.py", workflow)
 

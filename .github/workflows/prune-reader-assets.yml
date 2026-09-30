@@ -16,9 +16,9 @@ on:
         default: "14"
         type: string
       limit:
-        description: Maximum objects deleted in one run
+        description: Maximum objects deleted in one run; 0 means no limit
         required: true
-        default: "1000"
+        default: "0"
         type: string
 
 concurrency:
@@ -39,6 +39,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--grace-days "${{ inputs.grace_days || '14' }}" --limit "${{ inputs.limit || '1000' }}")
+          args=(--grace-days "${{ inputs.grace_days || '14' }}" --limit "${{ inputs.limit || '0' }}")
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"

@@ -11,9 +11,9 @@ on:
         default: false
         type: boolean
       limit:
-        description: Maximum staging objects deleted in one run
+        description: Maximum staging objects deleted in one run; 0 means no limit
         required: true
-        default: "1000"
+        default: "0"
         type: string
       include_input_bucket:
         description: Scan melsm PNG/JXL objects; enable only after their migration is complete
@@ -39,7 +39,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          args=(--limit "${{ inputs.limit || '1000' }}")
+          args=(--limit "${{ inputs.limit || '0' }}")
           if [[ "${{ inputs.include_input_bucket }}" == "true" ]]; then args+=(--include-input-bucket); fi
           if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"
