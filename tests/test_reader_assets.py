@@ -67,8 +67,12 @@ class ReaderAssetContractTests(unittest.TestCase):
         store._input_namespace = "other-account"
         store._input_bucket = "melsm"
         store._clients = {}
-        with self.assertRaises(RuntimeError):
-            store._client("other-account")
+        with patch.dict("os.environ", {
+            "HF_S3_INPUT_ACCESS_KEY_ID": "",
+            "HF_S3_INPUT_SECRET_ACCESS_KEY": "",
+        }):
+            with self.assertRaises(RuntimeError):
+                store._client("other-account")
 
         with patch.dict("os.environ", {
             "HF_S3_INPUT_ACCESS_KEY_ID": "input-key",

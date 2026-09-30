@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import gzip
 import json
 import os
@@ -54,6 +55,10 @@ class S3BucketStore:
         self._namespace = os.environ.get("HF_S3_NAMESPACE", "vomebook")
         self._input_namespace = os.environ.get("HF_S3_INPUT_NAMESPACE", self._namespace)
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", PDF_OCR_INPUT_BUCKET)
+        try:
+            self._list_workers = max(1, int(os.environ.get("HF_S3_LIST_WORKERS", "16")))
+        except ValueError as error:
+            raise RuntimeError("HF_S3_LIST_WORKERS must be a positive integer") from error
         self._clients = {}
 
     def _location(self, bucket: str) -> tuple[str, str]:
@@ -85,14 +90,33 @@ class S3BucketStore:
             self._clients[client_key] = client
         return client
 
+    @staticmethod
+    def _list_level(client, bucket_name: str, prefix: str) -> tuple[set[str], set[str]]:
+        files = set()
+        children = set()
+        for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket_name, Prefix=prefix, Delimiter="/"):
+            files.update(item["Key"] for item in page.get("Contents", []))
+            children.update(item["Prefix"] for item in page.get("CommonPrefixes", []))
+        return files, children
+
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
         namespace, bucket_name = self._location(bucket)
         client = self._client(namespace)
         files = set()
-        paginator = client.get_paginator("list_objects_v2")
-        for prefix in prefixes:
-            for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
-                files.update(item["Key"] for item in page.get("Contents", []))
+        pending = set(prefixes)
+        while pending:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(self._list_workers, len(pending))) as executor:
+                results = executor.map(
+                    lambda prefix: self._list_level(client, bucket_name, prefix),
+                    sorted(pending),
+                )
+                next_pending = set()
+                for level_files, children in results:
+                    files.update(level_files)
+                    next_pending.update(children)
+            pending = next_pending
         return files
 
     def read_bytes(self, bucket: str, path: str) -> bytes:
@@ -230,6 +254,7 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
         store, READER_ASSETS_BUCKET,
         (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
     )
+    print(f"listed {READER_ASSETS_BUCKET}: {len(files)} object(s)")
     payloads = read_index_payloads(store, files)
     lifecycle = payloads.get(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
                              {"version": 1, "files": {}, "orphans": {}})
@@ -239,11 +264,14 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     candidates = set(asset_candidates)
     input_files = (bucket_files(store, PDF_OCR_INPUT_BUCKET, ("objects/",))
                    if include_input_bucket else set())
+    if include_input_bucket:
+        print(f"listed {PDF_OCR_INPUT_BUCKET}: {len(input_files)} object(s)")
     input_references = {path for path in references if "/ocr-input/" in path or path.endswith(".jxl")}
     input_candidates = {f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files
                         if path not in input_references}
     candidates.update(input_candidates)
     staging_files = bucket_files(store, READER_STAGING_BUCKET, ("objects/", "staging/"))
+    print(f"listed {READER_STAGING_BUCKET}: {len(staging_files)} object(s)")
     staging_references: set[str] = set()
     for payload in payloads.values():
         collect_bucket_paths(payload, READER_STAGING_BUCKET, staging_references)
