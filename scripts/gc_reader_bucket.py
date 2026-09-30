@@ -50,6 +50,7 @@ class S3BucketStore:
         self._config = Config(
             region_name="us-east-1",
             s3={"addressing_style": "path"},
+            retries={"mode": "adaptive", "max_attempts": 8},
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
         )
@@ -58,8 +59,9 @@ class S3BucketStore:
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", PDF_OCR_INPUT_BUCKET)
         try:
             self._list_workers = max(1, int(os.environ.get("HF_S3_LIST_WORKERS", "16")))
+            self._manifest_workers = max(1, int(os.environ.get("HF_S3_MANIFEST_WORKERS", "4")))
         except ValueError as error:
-            raise RuntimeError("HF_S3_LIST_WORKERS must be a positive integer") from error
+            raise RuntimeError("HF_S3_LIST_WORKERS and HF_S3_MANIFEST_WORKERS must be positive integers") from error
         self._clients = {}
 
     def _location(self, bucket: str) -> tuple[str, str]:
@@ -297,7 +299,7 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
             except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
                 raise IndexUnavailable(f"unreadable Reader object manifest: {path}")
 
-        workers = getattr(store, "_list_workers", 16)
+        workers = getattr(store, "_manifest_workers", 4)
         if not isinstance(workers, int):
             workers = 16
         with concurrent.futures.ThreadPoolExecutor(
