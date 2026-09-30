@@ -50,9 +50,12 @@ def collect_paths(value, output: set[str]) -> None:
         output.add(value)
 
 
-def bucket_files(bucket: str, token: str) -> set[str]:
-    return {item.path for item in list_bucket_tree(bucket, recursive=True, token=token)
-            if item.type == "file"}
+def bucket_files(bucket: str, token: str, prefixes: tuple[str, ...]) -> set[str]:
+    files = set()
+    for prefix in prefixes:
+        files.update(item.path for item in list_bucket_tree(
+            bucket, prefix=prefix, recursive=True, token=token) if item.type == "file")
+    return files
 
 
 def current_references(token: str, files: set[str], lifecycle: dict) -> set[str]:
@@ -97,7 +100,10 @@ def current_references(token: str, files: set[str], lifecycle: dict) -> set[str]
 
 
 def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
-    files = bucket_files(READER_ASSETS_BUCKET, token)
+    files = bucket_files(
+        READER_ASSETS_BUCKET, token,
+        (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
+    )
     try:
         lifecycle = read_json(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}", token)
     except (OSError, ValueError, json.JSONDecodeError):
@@ -105,10 +111,11 @@ def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool 
     references = current_references(token, files, lifecycle)
     candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
                   if path not in references and not path.startswith(INDEX_PREFIX + "/")}
-    input_files = bucket_files(PDF_OCR_INPUT_BUCKET, token) if include_input_bucket else set()
+    input_files = (bucket_files(PDF_OCR_INPUT_BUCKET, token, ("objects/",))
+                   if include_input_bucket else set())
     input_references = {path for path in references if "/ocr-input/" in path or path.endswith(".jxl")}
     candidates.update(f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files if path not in input_references)
-    staging_files = bucket_files(READER_STAGING_BUCKET, token)
+    staging_files = bucket_files(READER_STAGING_BUCKET, token, ("staging/",))
     staging_references = {path for path in references if path.startswith("staging/pdf/")}
     candidates.update(f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
                      if path not in staging_references)
