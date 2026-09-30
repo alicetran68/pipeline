@@ -33,10 +33,11 @@ class ReaderAssetContractTests(unittest.TestCase):
             "live": {"s": 2, "p": "objects/live", "b": "vomebook/pdf-pages"},
             "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},
         }}).encode())
-        with patch.object(gc_reader_bucket, "read_bytes", return_value=sidecar):
-            references = gc_reader_bucket.current_references(
-                "token", {"reader-index/reader_assets.json.gz", "objects/live", "objects/old"}, {}
-            )
+        store = Mock()
+        store.read_bytes.return_value = sidecar
+        files = {"reader-index/reader_assets.json.gz", "objects/live", "objects/old"}
+        payloads = gc_reader_bucket.read_index_payloads(store, files)
+        references = gc_reader_bucket.current_references(files, {}, payloads)
         self.assertIn("objects/live", references)
         self.assertNotIn("objects/old", references)
 

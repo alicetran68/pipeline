@@ -9,22 +9,117 @@ import json
 import os
 from datetime import date, timedelta
 
-from huggingface_hub import batch_bucket_files, list_bucket_tree
-
 try:
     from .reader_assets import READER_ASSETS_BUCKET, READER_STAGING_BUCKET
     from .shared import PDF_OCR_INPUT_BUCKET
-    from .reader_bucket import INDEX_PREFIX, publish_json, read_bytes, read_json
+    from .reader_bucket import INDEX_PREFIX
     from .reader_lifecycle import LIFECYCLE_NAME, mark_orphans
 except ImportError:
     from reader_assets import READER_ASSETS_BUCKET, READER_STAGING_BUCKET
     from shared import PDF_OCR_INPUT_BUCKET
-    from reader_bucket import INDEX_PREFIX, publish_json, read_bytes, read_json
+    from reader_bucket import INDEX_PREFIX
     from reader_lifecycle import LIFECYCLE_NAME, mark_orphans
 
 
 class IndexUnavailable(RuntimeError):
     """The collector cannot prove that the bucket reference graph is complete."""
+
+
+class S3NotFound(FileNotFoundError):
+    """An expected optional S3 object does not exist."""
+
+
+class S3BucketStore:
+    """Small S3 adapter for Hugging Face Storage Buckets."""
+
+    def __init__(self) -> None:
+        access_key = os.environ.get("HF_S3_ACCESS_KEY_ID")
+        secret_key = os.environ.get("HF_S3_SECRET_ACCESS_KEY")
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                "HF_S3_ACCESS_KEY_ID and HF_S3_SECRET_ACCESS_KEY are required"
+            )
+        try:
+            import boto3
+            from botocore.config import Config
+        except ImportError as error:
+            raise RuntimeError("boto3 is required for bucket GC") from error
+        self._boto3 = boto3
+        self._config = Config(
+            region_name="us-east-1",
+            s3={"addressing_style": "path"},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+        self._access_key = access_key
+        self._secret_key = secret_key
+        self._namespace = os.environ.get("HF_S3_NAMESPACE", "vomebook")
+        self._clients = {}
+
+    def _location(self, bucket: str) -> tuple[str, str]:
+        if "/" in bucket:
+            return bucket.rsplit("/", 1)
+        if bucket == PDF_OCR_INPUT_BUCKET:
+            return (
+                os.environ.get("HF_S3_INPUT_NAMESPACE", self._namespace),
+                os.environ.get("HF_S3_INPUT_BUCKET", bucket),
+            )
+        return self._namespace, bucket
+
+    def _client(self, namespace: str):
+        client = self._clients.get(namespace)
+        if client is None:
+            client = self._boto3.client(
+                "s3",
+                endpoint_url=f"https://s3.hf.co/{namespace}",
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+                config=self._config,
+            )
+            self._clients[namespace] = client
+        return client
+
+    def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
+        namespace, bucket_name = self._location(bucket)
+        client = self._client(namespace)
+        files = set()
+        paginator = client.get_paginator("list_objects_v2")
+        for prefix in prefixes:
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+                files.update(item["Key"] for item in page.get("Contents", []))
+        return files
+
+    def read_bytes(self, bucket: str, path: str) -> bytes:
+        namespace, bucket_name = self._location(bucket)
+        try:
+            response = self._client(namespace).get_object(Bucket=bucket_name, Key=path)
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") in {"404", "NoSuchKey"}:
+                raise S3NotFound(path) from error
+            raise
+        return response["Body"].read()
+
+    def put_json(self, bucket: str, path: str, payload: dict) -> None:
+        namespace, bucket_name = self._location(bucket)
+        body = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+        self._client(namespace).put_object(
+            Bucket=bucket_name, Key=path, Body=body, ContentType="application/json"
+        )
+
+    def delete(self, bucket: str, paths: list[str]) -> None:
+        namespace, bucket_name = self._location(bucket)
+        client = self._client(namespace)
+        for start in range(0, len(paths), 1000):
+            response = client.delete_objects(
+                Bucket=bucket_name,
+                Delete={
+                    "Objects": [{"Key": path} for path in paths[start:start + 1000]],
+                    "Quiet": True,
+                },
+            )
+            errors = response.get("Errors", [])
+            if errors:
+                raise RuntimeError(f"S3 delete failed for {len(errors)} object(s)")
 
 
 def apply_limit(paths: list[str], limit: int) -> list[str]:
@@ -73,82 +168,83 @@ def collect_bucket_paths(value, bucket: str, output: set[str]) -> None:
             collect_bucket_paths(item, bucket, output)
 
 
-def bucket_files(bucket: str, token: str, prefixes: tuple[str, ...]) -> set[str]:
-    files = set()
-    for prefix in prefixes:
-        files.update(item.path for item in list_bucket_tree(
-            bucket, prefix=prefix, recursive=True, token=token) if item.type == "file")
-    return files
+def bucket_files(store: S3BucketStore, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
+    return store.list_files(bucket, prefixes)
 
 
-def current_references(token: str, files: set[str], lifecycle: dict) -> set[str]:
-    # The compact sidecar is the published Reader routing index. The full
-    # manifest and lifecycle file are introduced by the incremental migrator
-    # and may not exist while older published assets are being collected.
+def read_index_payloads(store: S3BucketStore, files: set[str]) -> dict[str, dict]:
     required = {f"{INDEX_PREFIX}/reader_assets.json.gz"}
     if not required.issubset(files):
         raise IndexUnavailable("required Reader bucket indexes are missing")
-    references = {path for path in files if path.startswith(INDEX_PREFIX + "/")}
-    active_keys: set[str] = set()
-    registry_paths = sorted(path for path in files if path.startswith(INDEX_PREFIX + "/"))
-    for path in registry_paths:
+    payloads = {}
+    for path in sorted(path for path in files if path.startswith(INDEX_PREFIX + "/")):
         try:
-            raw = read_bytes(path, token)
+            raw = store.read_bytes(READER_ASSETS_BUCKET, path)
             payload = decode_sidecar(raw) if path.endswith(".json.gz") else json.loads(raw.decode("utf-8"))
-            if path.endswith("/reader_lifecycle.json"):
-                # Lifecycle owns staging inputs. A completed staging record is
-                # intentionally collectible and must not keep its PDF alive.
-                for key, entry in payload.get("files", {}).items():
-                    if not isinstance(entry, dict):
-                        continue
-                    if entry.get("phase") in {"staging", "processing"} or (
-                            entry.get("phase") == "final" and key in active_keys):
-                        references.update(entry.get("paths") or [entry.get("path", "")])
-            elif path.endswith("/manifest.json"):
-                active_keys = {key for key, value in payload.get("files", {}).items()
-                               if isinstance(value, dict) and value.get("status") == "ready"
-                               and not value.get("bucket_staging")}
-                filtered = dict(payload)
-                filtered["files"] = {
-                    key: value for key, value in payload.get("files", {}).items()
-                    if not isinstance(value, dict) or not value.get("bucket_staging")
-                }
-                collect_paths(filtered, references)
-            else:
-                collect_paths(payload, references)
+            payloads[path] = payload if isinstance(payload, dict) else {}
         except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
             raise IndexUnavailable(f"unreadable Reader bucket index: {path}")
+    return payloads
+
+
+def current_references(files: set[str], lifecycle: dict, payloads: dict[str, dict]) -> set[str]:
+    # The compact sidecar is the published Reader routing index. The full
+    # manifest and lifecycle file are introduced by the incremental migrator
+    # and may not exist while older published assets are being collected.
+    references = {path for path in files if path.startswith(INDEX_PREFIX + "/")}
+    active_keys: set[str] = set()
+    for path, payload in payloads.items():
+        if path.endswith("/reader_lifecycle.json"):
+            # Lifecycle owns staging inputs. A completed staging record is
+            # intentionally collectible and must not keep its PDF alive.
+            for key, entry in payload.get("files", {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("phase") in {"staging", "processing"} or (
+                        entry.get("phase") == "final" and key in active_keys):
+                    references.update(entry.get("paths") or [entry.get("path", "")])
+        elif path.endswith("/manifest.json"):
+            active_keys = {key for key, value in payload.get("files", {}).items()
+                           if isinstance(value, dict) and value.get("status") == "ready"
+                           and not value.get("bucket_staging")}
+            filtered = dict(payload)
+            filtered["files"] = {
+                key: value for key, value in payload.get("files", {}).items()
+                if not isinstance(value, dict) or not value.get("bucket_staging")
+            }
+            collect_paths(filtered, references)
+        else:
+            collect_paths(payload, references)
     return references
 
 
-def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
+def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
+            include_input_bucket: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
     files = bucket_files(
-        READER_ASSETS_BUCKET, token,
+        store, READER_ASSETS_BUCKET,
         (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
     )
-    try:
-        lifecycle = read_json(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}", token)
-    except (OSError, ValueError, json.JSONDecodeError):
-        lifecycle = {"version": 1, "files": {}, "orphans": {}}
-    references = current_references(token, files, lifecycle)
-    candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
-                  if path not in references and not path.startswith(INDEX_PREFIX + "/")}
-    input_files = (bucket_files(PDF_OCR_INPUT_BUCKET, token, ("objects/",))
+    payloads = read_index_payloads(store, files)
+    lifecycle = payloads.get(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
+                             {"version": 1, "files": {}, "orphans": {}})
+    references = current_references(files, lifecycle, payloads)
+    asset_candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
+                        if path not in references and not path.startswith(INDEX_PREFIX + "/")}
+    candidates = set(asset_candidates)
+    input_files = (bucket_files(store, PDF_OCR_INPUT_BUCKET, ("objects/",))
                    if include_input_bucket else set())
     input_references = {path for path in references if "/ocr-input/" in path or path.endswith(".jxl")}
-    candidates.update(f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files if path not in input_references)
-    staging_files = bucket_files(READER_STAGING_BUCKET, token, ("objects/", "staging/"))
+    input_candidates = {f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files
+                        if path not in input_references}
+    candidates.update(input_candidates)
+    staging_files = bucket_files(store, READER_STAGING_BUCKET, ("objects/", "staging/"))
     staging_references: set[str] = set()
-    for path in registry_paths:
-        try:
-            raw = read_bytes(path, token)
-            payload = decode_sidecar(raw) if path.endswith(".json.gz") else json.loads(raw.decode("utf-8"))
-            collect_bucket_paths(payload, READER_STAGING_BUCKET, staging_references)
-        except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
-            raise IndexUnavailable(f"unreadable Reader bucket index: {path}")
+    for payload in payloads.values():
+        collect_bucket_paths(payload, READER_STAGING_BUCKET, staging_references)
     staging_references.update(path for path in references if path.startswith("staging/pdf/"))
-    candidates.update(f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
-                     if path not in staging_references)
+    staging_candidates = {f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
+                          if path not in staging_references}
+    candidates.update(staging_candidates)
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())
     cutoff = date.today() - timedelta(days=grace_days)
     expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], READER_STAGING_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
@@ -163,8 +259,9 @@ def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool 
                 expired[bucket].append(object_path)
     for bucket in expired:
         expired[bucket] = apply_limit(expired[bucket], limit)
-    counts = {READER_ASSETS_BUCKET: len(candidates), READER_STAGING_BUCKET: len(staging_files),
-              PDF_OCR_INPUT_BUCKET: len(input_files)}
+    counts = {READER_ASSETS_BUCKET: len(asset_candidates),
+              READER_STAGING_BUCKET: len(staging_candidates),
+              PDF_OCR_INPUT_BUCKET: len(input_candidates)}
     return updated, expired, counts
 
 
@@ -178,11 +275,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.limit < 0 or args.grace_days < 0:
         raise ValueError("limit and grace-days must be non-negative")
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        raise RuntimeError("HF_TOKEN is required")
+    store = S3BucketStore()
     try:
-        lifecycle, expired, counts = plan_gc(token, args.grace_days, args.limit, args.include_input_bucket)
+        lifecycle, expired, counts = plan_gc(store, args.grace_days, args.limit, args.include_input_bucket)
     except IndexUnavailable as error:
         print(f"GC skipped: {error}")
         return 0
@@ -194,11 +289,11 @@ def main() -> int:
     if args.apply:
         for bucket, paths in expired.items():
             if paths:
-                batch_bucket_files(bucket, delete=paths, token=token)
+                store.delete(bucket, paths)
         expired_keys = {f"{bucket}:{path}" for bucket, paths in expired.items() for path in paths}
         lifecycle["orphans"] = {path: entry for path, entry in lifecycle.get("orphans", {}).items()
                                  if path not in expired_keys}
-        publish_json(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}", lifecycle, token)
+        store.put_json(READER_ASSETS_BUCKET, f"{INDEX_PREFIX}/{LIFECYCLE_NAME}", lifecycle)
         print(f"deleted {expired_count} unreferenced object(s)")
     return 0
 
