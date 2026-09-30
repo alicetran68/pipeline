@@ -1754,6 +1754,29 @@ class PublicationTests(unittest.TestCase):
             {result["path"], "manifest.json", "reader_assets.json.gz"},
         )
 
+    def test_combine_bundles_keeps_results_and_artifact_roots(self):
+        results = []
+        with tempfile.TemporaryDirectory() as root:
+            for index in range(2):
+                result = {
+                    "key": f"VoiceOfML/Test\\0Book-{index}.docx", "status": "ready",
+                    "source_revision": "rev1", "source_sha256": f"{index + 1:064x}",
+                    "source_bytes": 10, "source_extension": "docx", "profile": "docx-native-v2",
+                    "reader_mode": "docx", "path": f"objects/{index:02x}/document.docx",
+                }
+                bundle = self.make_bundle(str(Path(root) / f"bundle-{index}"), result)
+                results.append((bundle, result))
+            data, roots = publish_reader_assets.combine_bundles([item[0] for item in results])
+            merged = publish_reader_assets.materialize_bundles(
+                [item[0] for item in results], data, Path(root) / "merged")
+            merged_paths = [merged.joinpath(item[1]["path"]).is_file() for item in results]
+
+        self.assertEqual([item["key"] for item in data["results"]],
+                         [item[1]["key"] for item in results])
+        self.assertEqual(roots[results[0][1]["path"]], results[0][0])
+        self.assertEqual(roots[results[1][1]["path"]], results[1][0])
+        self.assertEqual(merged_paths, [True, True])
+
     def test_static_and_pdf_document_outputs_are_bucket_upload_candidates(self):
         data = {"results": [
             {"status": "ready", "reader_mode": "docx", "path": "objects/aa/document.docx"},
@@ -2314,7 +2337,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("djvu) packages=(djvulibre-bin qpdf poppler-utils)", workflow)
         self.assertIn("epub) packages=(calibre qpdf)", workflow)
         self.assertIn("mobi|azw3|fb2) packages=(calibre)", workflow)
-        self.assertIn("python scripts/publish_reader_assets.py --bundle \"${bundle}\"\n              sleep 5", workflow)
+        self.assertIn('python scripts/publish_reader_assets.py --bundles "${bundles[@]}"', workflow)
         self.assertIn("odt) packages=(libreoffice)", workflow)
         self.assertIn("rtf) packages=(calibre libreoffice", workflow)
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
@@ -2370,7 +2393,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("conversion_status=0", workflow)
         convert_section, publish_section = workflow.split("\n  publish:\n", 1)
         self.assertNotIn("publish_reader_assets.py", convert_section.split("\n  convert:\n", 1)[1])
-        self.assertIn('python scripts/publish_reader_assets.py --bundle "${bundle}"', publish_section)
+        self.assertIn('python scripts/publish_reader_assets.py --bundles "${bundles[@]}"', publish_section)
         self.assertIn("timeout-minutes: 360", publish_section)
 
     def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):

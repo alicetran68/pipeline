@@ -307,17 +307,26 @@ jobs:
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           shopt -s nullglob
+          destinations=()
           for archive in output/reader-assets/bundles/*.tgz output/reader-assets/bundles/*/*.tgz; do
             [[ -f "${archive}" ]] || continue
             destination="${RUNNER_TEMP}/published-$(basename "${archive%.tgz}")"
             mkdir -p "${destination}"
             tar -xzf "${archive}" -C "${destination}"
-            for bundle in "${destination}"/bundle-*; do
-              python scripts/publish_reader_assets.py --bundle "${bundle}"
-              sleep 5
-            done
-            rm -rf "${destination}" "${archive}"
+            destinations+=("${destination}")
+            rm -f "${archive}"
           done
+          bundles=()
+          for destination in "${destinations[@]}"; do
+            for bundle in "${destination}"/bundle-*; do
+              [[ -d "${bundle}" ]] || continue
+              bundles+=("${bundle}")
+            done
+          done
+          if ((${#bundles[@]})); then
+            python scripts/publish_reader_assets.py --bundles "${bundles[@]}"
+          fi
+          rm -rf "${destinations[@]}"
 
   finalize:
     needs: [plan, convert, publish]

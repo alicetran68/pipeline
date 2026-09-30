@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import tempfile
 import time
 from datetime import date
@@ -88,6 +89,111 @@ def staging_paths(data: dict) -> list[str]:
                    if result.get("status") == "ready"
                    and result.get("reader_mode") in BUCKET_STAGING_MODES
                    and isinstance(result.get("path"), str)})
+
+
+def load_bundle_data(bundle: Path) -> dict:
+    data = load_json(bundle / "bundle.json")
+    if data.get("version") != 1 or not isinstance(data.get("results"), list):
+        raise ValueError(f"invalid reader asset bundle: {bundle}")
+    return data
+
+
+def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
+    """Combine shard bundles without copying their potentially large artifacts."""
+    if not bundles:
+        raise ValueError("at least one reader asset bundle is required")
+    data = [load_bundle_data(bundle) for bundle in bundles]
+    force_values = {bool(item.get("force_rebuild")) for item in data}
+    authoritative_values = {bool(item.get("authoritative_snapshot")) for item in data}
+    migration_values = {bool(item.get("bucket_migration")) for item in data}
+    if len(force_values) > 1 or len(authoritative_values) > 1 or len(migration_values) > 1:
+        raise ValueError("reader asset bundles have incompatible publication modes")
+    results = []
+    roots: dict[str, Path] = {}
+    keys = set()
+    for bundle, item in zip(bundles, data):
+        for result in item["results"]:
+            key = result.get("key")
+            if key in keys:
+                raise ValueError(f"duplicate reader asset result: {key}")
+            if not key:
+                raise ValueError("reader asset result is missing key")
+            keys.add(key)
+            results.append(result)
+            for field in ("path", "chapter_manifest"):
+                path = result.get(field)
+                if isinstance(path, str):
+                    previous = roots.get(path)
+                    if previous is not None and previous != bundle:
+                        raise ValueError(f"duplicate reader asset artifact path: {path}")
+                    roots[path] = bundle
+    active_keys = sorted({key for item in data for key in item.get("active_keys", [])})
+    combined = {
+        "version": 1,
+        "results": results,
+        "force_rebuild": force_values.pop(),
+        "authoritative_snapshot": authoritative_values.pop(),
+        "bucket_migration": migration_values.pop(),
+        "active_keys": active_keys,
+    }
+    return combined, roots
+
+
+def artifact_files(data: dict, roots: dict[str, Path]) -> dict[str, tuple[Path, str]]:
+    """Return bucket paths and local files for results from multiple bundles."""
+    artifacts: dict[str, tuple[Path, str]] = {}
+    for result in data.get("results", []):
+        if result.get("status") != "ready":
+            continue
+        path = result.get("path")
+        root = roots.get(path)
+        if not isinstance(path, str) or root is None:
+            continue
+        artifact = root / path
+        if artifact.is_file():
+            artifacts[path] = (root, str(artifact))
+        if result.get("chapter_manifest"):
+            chapter_path = result["chapter_manifest"]
+            chapter_prefix = Path(chapter_path).parent
+            chapter_root = roots.get(chapter_path, root) / chapter_prefix
+            if not chapter_root.is_dir():
+                raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
+            for child in sorted(chapter_root.rglob("*")):
+                if child.is_file():
+                    relative = (chapter_prefix / child.relative_to(chapter_root)).as_posix()
+                    validate_storage_path(relative)
+                    artifacts[relative] = (root, str(root / relative))
+    return artifacts
+
+
+def sync_artifacts(artifacts: dict[str, tuple[Path, str]], token: str, bucket: str,
+                   max_attempts: int = 8) -> None:
+    """Upload files grouped by their original bundle root."""
+    grouped: dict[Path, list[str]] = {}
+    for remote_path, (root, _local_path) in artifacts.items():
+        grouped.setdefault(root, []).append(remote_path)
+    for root, paths in grouped.items():
+        _sync_bucket_with_retry(str(root), token, sorted(paths), bucket, max_attempts)
+
+
+def materialize_bundles(bundles: list[Path], data: dict, output: Path) -> Path:
+    """Build one upload tree using hardlinks instead of copying large objects."""
+    output.mkdir(parents=True, exist_ok=True)
+    for bundle in bundles:
+        for source in sorted(bundle.rglob("*")):
+            if not source.is_file() or source.name == "bundle.json":
+                continue
+            relative = source.relative_to(bundle)
+            destination = output / relative
+            if destination.exists():
+                raise ValueError(f"duplicate reader asset artifact path: {relative}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+    (output / "bundle.json").write_bytes(canonical_json(data, pretty=True))
+    return output
 
 
 def _sync_bucket_with_retry(local_dir: str, token: str | None, paths: list[str],
@@ -184,10 +290,13 @@ def remote_pdf_ocr_manifest(api: HfApi, repo_id: str, revision: str | None = Non
     return data
 
 
-def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None, range_manifest: dict | None = None):
-    data = load_json(bundle / "bundle.json")
+def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None,
+                  range_manifest: dict | None = None, *, data_override: dict | None = None,
+                  artifact_roots: dict[str, Path] | None = None):
+    data = data_override if data_override is not None else load_bundle_data(bundle)
     if data.get("version") != 1 or not isinstance(data.get("results"), list):
         raise ValueError("invalid reader asset bundle")
+    artifact_roots = artifact_roots or {}
     manifest = remote_manifest(api, repo_id, revision)
     pdf_manifest = remote_pdf_manifest(api, repo_id, revision)
     ocr_manifest = remote_pdf_ocr_manifest(api, repo_id, revision)
@@ -227,7 +336,8 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                         entry[field] = remote[field]
                 entry.pop("reused", None)
             else:
-                artifact = bundle / result["path"]
+                result_root = artifact_roots.get(result["path"], bundle)
+                artifact = result_root / result["path"]
                 if not artifact.is_file() or artifact.stat().st_size != result["bytes"]:
                     raise ValueError(f"missing or invalid artifact for {result['key']}")
                 if file_sha256(artifact) != result["sha256"]:
@@ -235,7 +345,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                 artifacts[result["path"]] = str(artifact)
                 if result.get("chapter_manifest"):
                     prefix = Path(result["chapter_manifest"]).parent
-                    root = bundle / prefix
+                    root = artifact_roots.get(result["chapter_manifest"], bundle) / prefix
                     if not root.is_dir():
                         raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
                     for child in sorted(root.rglob("*")):
@@ -310,7 +420,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
 
 
 def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int = 20) -> tuple[dict, int]:
-    data = load_json(bundle / "bundle.json")
+    data = load_bundle_data(bundle)
     result_keys = {result.get("key") for result in data.get("results", []) if result.get("key")}
     if type(api) is HfApi:
         return publish_bucket_bundle(api, repo_id, bundle, data, result_keys, max_attempts)
@@ -366,27 +476,27 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                                      if operation.path_in_repo == SIDECAR_NAME)
             stage_index(index_root.parent, "sidecar", sidecar_operation.path_or_fileobj)
             bucket_token = os.environ.get("HF_TOKEN")
-            lifecycle_path = index_root.parent / INDEX_FILES["lifecycle"]
-            try:
-                lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], bucket_token)
-            except (FileNotFoundError, OSError, ValueError):
-                lifecycle = {"version": 1, "files": {}}
-            lifecycle_updates = []
-            for result in data.get("results", []):
-                if result.get("status") != "ready":
-                    continue
-                if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
-                        or result.get("chapter_manifest")):
-                    continue
-                result_with_paths = dict(result)
-                result_with_paths["bucket_staging"] = result.get("reader_mode") in BUCKET_STAGING_MODES
-                result_with_paths["bucket_paths"] = bucket_paths({"results": [result]}, bundle)
-                lifecycle_updates.append(staging_record(result_with_paths))
-            lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
-            lifecycle_path.write_text(json.dumps(merge_lifecycle(lifecycle, lifecycle_updates),
-                                                 ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                                      encoding="utf-8")
             if bucket_token and type(api) is HfApi:
+                lifecycle_path = index_root.parent / INDEX_FILES["lifecycle"]
+                try:
+                    lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], bucket_token)
+                except (FileNotFoundError, OSError, ValueError):
+                    lifecycle = {"version": 1, "files": {}}
+                lifecycle_updates = []
+                for result in data.get("results", []):
+                    if result.get("status") != "ready":
+                        continue
+                    if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
+                            or result.get("chapter_manifest")):
+                        continue
+                    result_with_paths = dict(result)
+                    result_with_paths["bucket_staging"] = result.get("reader_mode") in BUCKET_STAGING_MODES
+                    result_with_paths["bucket_paths"] = bucket_paths({"results": [result]}, bundle)
+                    lifecycle_updates.append(staging_record(result_with_paths))
+                lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+                lifecycle_path.write_text(json.dumps(merge_lifecycle(lifecycle, lifecycle_updates),
+                                                     ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                                          encoding="utf-8")
                 _sync_bucket_with_retry(str(index_root.parent), bucket_token,
                                         ["reader-index/**"])
             return manifest, len(result_keys)
@@ -405,7 +515,8 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
 
 
 def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
-                          result_keys: set[str], max_attempts: int) -> tuple[dict, int]:
+                          result_keys: set[str], max_attempts: int,
+                          artifact_roots: dict[str, Path] | None = None) -> tuple[dict, int]:
     """Publish Reader objects and all indexes atomically in the bucket namespace."""
     token = os.environ.get("HF_TOKEN")
     if not token:
@@ -416,12 +527,19 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             if attempt and bundle_is_published(current, data):
                 return current, 0
             range_manifest = remote_state(api, repo_id)
-            manifest, operations = build_publish(api, repo_id, bundle, None, range_manifest)
-            paths = bucket_paths(data, bundle)
-            if paths:
+            manifest, operations = build_publish(
+                api, repo_id, bundle, None, range_manifest,
+                data_override=data, artifact_roots=artifact_roots,
+            )
+            artifacts = artifact_files(data, artifact_roots or {})
+            if artifacts:
                 staging = set(staging_paths(data))
-                _sync_bucket_with_retry(str(bundle), token, [path for path in paths if path not in staging])
-                _sync_bucket_with_retry(str(bundle), token, sorted(staging), READER_STAGING_BUCKET)
+                regular = {path: value for path, value in artifacts.items() if path not in staging}
+                staged = {path: value for path, value in artifacts.items() if path in staging}
+                if regular:
+                    sync_artifacts(regular, token, READER_ASSETS_BUCKET)
+                if staged:
+                    sync_artifacts(staged, token, READER_STAGING_BUCKET)
             lifecycle = {"version": 1, "files": {}, "orphans": {}}
             try:
                 lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], token)
@@ -436,7 +554,8 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                     continue
                 item = dict(result)
                 item["bucket_staging"] = result.get("reader_mode") in BUCKET_STAGING_MODES
-                item["bucket_paths"] = bucket_paths({"results": [result]}, bundle)
+                item["bucket_paths"] = bucket_paths(
+                    {"results": [result]}, (artifact_roots or {}).get(result.get("path"), bundle))
                 updates.append(staging_record(item))
             lifecycle = merge_lifecycle(lifecycle, updates)
             with tempfile.TemporaryDirectory(prefix="reader-index-") as root:
@@ -464,9 +583,22 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
     raise RuntimeError("Reader bucket publication retry limit reached")
 
 
+def publish_bundles(api: HfApi, repo_id: str, bundles: list[Path], *, max_attempts: int = 20) -> tuple[dict, int]:
+    """Publish all bundles in one shard with one manifest/index update."""
+    data, _artifact_roots = combine_bundles(bundles)
+    result_keys = {result["key"] for result in data["results"]}
+    if type(api) is HfApi:
+        with tempfile.TemporaryDirectory(prefix="reader-shard-") as temporary:
+            merged = materialize_bundles(bundles, data, Path(temporary) / "bundle")
+            return publish_bucket_bundle(api, repo_id, merged, data, result_keys, max_attempts)
+    raise RuntimeError("batch Reader publication requires the bucket API")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, default=Path("output/reader-assets/bundle"))
+    parser.add_argument("--bundles", type=Path, nargs="+",
+                        help="Publish multiple conversion bundles as one shard")
     parser.add_argument("--assets-repo", default=os.environ.get("READER_ASSETS_REPO", READER_ASSETS_REPO))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -478,11 +610,17 @@ def main() -> int:
     if not token and not args.dry_run:
         raise RuntimeError("HF_TOKEN is required")
     api = HfApi(token=token or None)
+    bundles = args.bundles or [args.bundle]
     if args.dry_run:
+        if len(bundles) != 1:
+            raise RuntimeError("--dry-run accepts only one bundle")
         manifest, operations = build_publish(api, args.assets_repo, args.bundle)
         print(f"dry run: validated {len(operations) - 2} artifact(s), {len(manifest['files'])} manifest entries")
         return 0
-    _, artifact_count = publish_bundle(api, args.assets_repo, args.bundle)
+    if args.bundles:
+        _, artifact_count = publish_bundles(api, args.assets_repo, bundles)
+    else:
+        _, artifact_count = publish_bundle(api, args.assets_repo, args.bundle)
     print(f"published {artifact_count} artifact(s) to {args.assets_repo}")
     return 0
 
