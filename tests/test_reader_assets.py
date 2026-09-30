@@ -49,6 +49,36 @@ class ReaderAssetContractTests(unittest.TestCase):
         gc_reader_bucket.collect_bucket_paths(sidecar, "vomebook/pdf-optimized", references)
         self.assertEqual(references, {"objects/optimized"})
 
+    def test_bucket_gc_can_use_separate_input_account_credentials(self):
+        class FakeBoto3:
+            def __init__(self):
+                self.calls = []
+
+            def client(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return object()
+
+        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
+        store._boto3 = FakeBoto3()
+        store._config = object()
+        store._access_key = "main-key"
+        store._secret_key = "main-secret"
+        store._namespace = "vomebook"
+        store._input_namespace = "other-account"
+        store._input_bucket = "melsm"
+        store._clients = {}
+        with self.assertRaises(RuntimeError):
+            store._client("other-account")
+
+        with patch.dict("os.environ", {
+            "HF_S3_INPUT_ACCESS_KEY_ID": "input-key",
+            "HF_S3_INPUT_SECRET_ACCESS_KEY": "input-secret",
+        }):
+            store._clients = {}
+            store._client("other-account")
+        kwargs = store._boto3.calls[-1][1]
+        self.assertEqual(kwargs["aws_access_key_id"], "input-key")
+
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),

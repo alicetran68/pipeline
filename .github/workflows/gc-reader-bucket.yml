@@ -54,6 +54,8 @@ jobs:
         env:
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_INPUT_ACCESS_KEY_ID: ${{ secrets.HF_S3_INPUT_ACCESS_KEY_ID }}
+          HF_S3_INPUT_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_INPUT_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: ${{ vars.HF_S3_NAMESPACE || 'vomebook' }}
           HF_S3_INPUT_NAMESPACE: ${{ inputs.input_namespace || vars.HF_S3_INPUT_NAMESPACE || vars.HF_S3_NAMESPACE || 'vomebook' }}
           HF_S3_INPUT_BUCKET: ${{ inputs.input_bucket || vars.HF_S3_INPUT_BUCKET || 'melsm' }}

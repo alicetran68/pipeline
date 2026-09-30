@@ -33,9 +33,9 @@ class S3BucketStore:
     """Small S3 adapter for Hugging Face Storage Buckets."""
 
     def __init__(self) -> None:
-        access_key = os.environ.get("HF_S3_ACCESS_KEY_ID")
-        secret_key = os.environ.get("HF_S3_SECRET_ACCESS_KEY")
-        if not access_key or not secret_key:
+        self._access_key = os.environ.get("HF_S3_ACCESS_KEY_ID")
+        self._secret_key = os.environ.get("HF_S3_SECRET_ACCESS_KEY")
+        if not self._access_key or not self._secret_key:
             raise RuntimeError(
                 "HF_S3_ACCESS_KEY_ID and HF_S3_SECRET_ACCESS_KEY are required"
             )
@@ -51,32 +51,38 @@ class S3BucketStore:
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
         )
-        self._access_key = access_key
-        self._secret_key = secret_key
         self._namespace = os.environ.get("HF_S3_NAMESPACE", "vomebook")
+        self._input_namespace = os.environ.get("HF_S3_INPUT_NAMESPACE", self._namespace)
+        self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", PDF_OCR_INPUT_BUCKET)
         self._clients = {}
 
     def _location(self, bucket: str) -> tuple[str, str]:
         if "/" in bucket:
             return bucket.rsplit("/", 1)
         if bucket == PDF_OCR_INPUT_BUCKET:
-            return (
-                os.environ.get("HF_S3_INPUT_NAMESPACE", self._namespace),
-                os.environ.get("HF_S3_INPUT_BUCKET", bucket),
-            )
+            return self._input_namespace, self._input_bucket
         return self._namespace, bucket
 
     def _client(self, namespace: str):
-        client = self._clients.get(namespace)
+        input_credentials = namespace == self._input_namespace and namespace != self._namespace
+        access_key = os.environ.get("HF_S3_INPUT_ACCESS_KEY_ID") if input_credentials else self._access_key
+        secret_key = os.environ.get("HF_S3_INPUT_SECRET_ACCESS_KEY") if input_credentials else self._secret_key
+        if not access_key or not secret_key:
+            raise RuntimeError(
+                "HF_S3_INPUT_ACCESS_KEY_ID and HF_S3_INPUT_SECRET_ACCESS_KEY are required "
+                f"for namespace {namespace}"
+            )
+        client_key = (namespace, access_key)
+        client = self._clients.get(client_key)
         if client is None:
             client = self._boto3.client(
                 "s3",
                 endpoint_url=f"https://s3.hf.co/{namespace}",
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
                 config=self._config,
             )
-            self._clients[namespace] = client
+            self._clients[client_key] = client
         return client
 
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
