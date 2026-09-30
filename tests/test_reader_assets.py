@@ -95,6 +95,8 @@ class ReaderAssetContractTests(unittest.TestCase):
         updated, expired, counts = gc_reader_bucket.plan_gc(store, 0, 0, jxl_only=True)
         self.assertEqual(counts[reader_assets.READER_ASSETS_BUCKET], 1)
         self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/old.jxl"])
+        self.assertEqual(counts["__jxl_total"], 1)
+        self.assertEqual(counts["__jxl_referenced"], 0)
 
     def test_bucket_gc_can_use_separate_input_account_credentials(self):
         class FakeBoto3:

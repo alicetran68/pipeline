@@ -343,6 +343,8 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
                              {"version": 1, "files": {}, "orphans": {}})
     references = current_references(files, lifecycle, payloads)
     expand_reference_closure(store, files, references)
+    jxl_total = sum(path.lower().endswith(".jxl") for path in files)
+    jxl_referenced = sum(path.lower().endswith(".jxl") for path in references)
     asset_candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
                         if path not in references and not path.startswith(INDEX_PREFIX + "/")}
     candidates = set(asset_candidates)
@@ -385,6 +387,8 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     counts = {READER_ASSETS_BUCKET: len(asset_candidates),
               READER_STAGING_BUCKET: len(staging_candidates),
               PDF_OCR_INPUT_BUCKET: len(input_candidates)}
+    counts["__jxl_total"] = jxl_total
+    counts["__jxl_referenced"] = jxl_referenced
     return updated, expired, counts
 
 
@@ -411,7 +415,10 @@ def main() -> int:
         print(f"GC skipped: {error}")
         return 0
     expired_count = sum(len(paths) for paths in expired.values())
-    print(f"found {sum(counts.values())} unreferenced object(s), {expired_count} past grace period")
+    bucket_count = sum(counts.get(bucket, 0) for bucket in expired)
+    print(f"found {bucket_count} unreferenced object(s), {expired_count} past grace period")
+    if "__jxl_total" in counts:
+        print(f"JXL objects: {counts['__jxl_total']} total, {counts['__jxl_referenced']} referenced")
     if args.show_paths:
         for bucket, paths in expired.items():
             for path in paths:
