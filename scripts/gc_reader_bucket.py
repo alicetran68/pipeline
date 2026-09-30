@@ -281,48 +281,52 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
         "/page-manifest.json", "/ocr-manifest.json", "/render-manifest.json",
         "/chapter-manifest.json",
     )
-    pending = sorted(path for path in references
-                     if path in files and path.endswith(manifest_suffixes))
+    pending = {path for path in references if path in files and path.endswith(manifest_suffixes)}
     seen = set()
     while pending:
-        path = pending.pop()
-        if path in seen:
-            continue
-        seen.add(path)
-        try:
-            raw = store.read_bytes(READER_ASSETS_BUCKET, path)
-            payload = json.loads(gzip.decompress(raw).decode("utf-8")
-                                 if raw[:2] == b"\x1f\x8b" else raw.decode("utf-8"))
-            if not isinstance(payload, dict):
-                continue
-        except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
-            raise IndexUnavailable(f"unreadable Reader object manifest: {path}")
-        before = len(references)
-        collect_paths(payload, references)
-        if path.endswith("/page-manifest.json"):
-            page_count = payload.get("page_count")
-            if not isinstance(page_count, int) or page_count < 1:
-                raise IndexUnavailable(f"invalid PDF page manifest: {path}")
-            root = posixpath.dirname(path)
-            references.update(
-                f"{root}/pages/page-{number:06d}.webp"
-                for number in range(1, page_count + 1)
-            )
-        elif path.endswith("/chapter-manifest.json"):
-            root = posixpath.dirname(path)
-            chapters = payload.get("chapters")
-            if not isinstance(chapters, list):
-                raise IndexUnavailable(f"invalid ebook chapter manifest: {path}")
-            for chapter in chapters:
-                if isinstance(chapter, dict) and isinstance(chapter.get("path"), str):
-                    references.add(posixpath.normpath(posixpath.join(root, chapter["path"])))
-            search_index = payload.get("search_index")
-            if isinstance(search_index, dict) and isinstance(search_index.get("path"), str):
-                references.add(posixpath.normpath(posixpath.join(root, search_index["path"])))
-        if len(references) != before:
-            pending.extend(sorted(path for path in references
-                                  if path in files and path.endswith(manifest_suffixes)
-                                  and path not in seen))
+        batch = sorted(pending)
+        pending.clear()
+        seen.update(batch)
+
+        def load(path: str) -> tuple[str, dict]:
+            try:
+                raw = store.read_bytes(READER_ASSETS_BUCKET, path)
+                payload = json.loads(gzip.decompress(raw).decode("utf-8")
+                                     if raw[:2] == b"\x1f\x8b" else raw.decode("utf-8"))
+                return path, payload if isinstance(payload, dict) else {}
+            except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
+                raise IndexUnavailable(f"unreadable Reader object manifest: {path}")
+
+        workers = getattr(store, "_list_workers", 16)
+        if not isinstance(workers, int):
+            workers = 16
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(workers, len(batch))) as executor:
+            payloads = executor.map(load, batch)
+            for path, payload in payloads:
+                collect_paths(payload, references)
+                if path.endswith("/page-manifest.json"):
+                    page_count = payload.get("page_count")
+                    if not isinstance(page_count, int) or page_count < 1:
+                        raise IndexUnavailable(f"invalid PDF page manifest: {path}")
+                    root = posixpath.dirname(path)
+                    references.update(
+                        f"{root}/pages/page-{number:06d}.webp"
+                        for number in range(1, page_count + 1)
+                    )
+                elif path.endswith("/chapter-manifest.json"):
+                    root = posixpath.dirname(path)
+                    chapters = payload.get("chapters")
+                    if not isinstance(chapters, list):
+                        raise IndexUnavailable(f"invalid ebook chapter manifest: {path}")
+                    for chapter in chapters:
+                        if isinstance(chapter, dict) and isinstance(chapter.get("path"), str):
+                            references.add(posixpath.normpath(posixpath.join(root, chapter["path"])))
+                    search_index = payload.get("search_index")
+                    if isinstance(search_index, dict) and isinstance(search_index.get("path"), str):
+                        references.add(posixpath.normpath(posixpath.join(root, search_index["path"])))
+        pending.update(path for path in references if path in files
+                       and path.endswith(manifest_suffixes) and path not in seen)
 
 
 def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
@@ -384,6 +388,8 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--include-input-bucket", action="store_true",
                         help="Also scan the OCR PNG/JXL input bucket after its migration is complete")
+    parser.add_argument("--show-paths", action="store_true",
+                        help="Print every expired object path in report-only output")
     args = parser.parse_args()
     if args.limit < 0 or args.grace_days < 0:
         raise ValueError("limit and grace-days must be non-negative")
@@ -395,9 +401,10 @@ def main() -> int:
         return 0
     expired_count = sum(len(paths) for paths in expired.values())
     print(f"found {sum(counts.values())} unreferenced object(s), {expired_count} past grace period")
-    for bucket, paths in expired.items():
-        for path in paths:
-            print(f"{bucket}:{path}")
+    if args.show_paths:
+        for bucket, paths in expired.items():
+            for path in paths:
+                print(f"{bucket}:{path}")
     if args.apply:
         for bucket, paths in expired.items():
             if paths:
