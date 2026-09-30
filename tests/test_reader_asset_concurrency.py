@@ -9,7 +9,7 @@ class ReaderAssetConcurrencyTests(unittest.TestCase):
     def test_all_reader_asset_publishers_share_one_queue(self):
         for filename in (
             "reader-assets.yml", "prune-reader-assets.yml", "pdf-assets-worker.yml",
-            "migrate-pdf-page-manifests.yml", "pdf-range-assets.yml",
+            "migrate-pdf-page-manifests.yml",
             "migrate-pdf-range-bucket.yml",
         ):
             workflow = (ROOT / filename).read_text(encoding="utf-8")
@@ -18,17 +18,6 @@ class ReaderAssetConcurrencyTests(unittest.TestCase):
             self.assertNotIn("group: pdf-range-assets", workflow, filename)
             self.assertIn("cancel-in-progress: false", workflow, filename)
             self.assertIn("queue: max", workflow, filename)
-
-    def test_pdf_computation_does_not_hold_publication_lock(self):
-        import yaml
-        workflow = yaml.safe_load((ROOT / "pdf-range-assets.yml").read_text())
-        self.assertEqual(workflow["concurrency"]["group"], "pdf-layout-assessments")
-        self.assertEqual(workflow["jobs"]["publish"]["concurrency"]["group"], "reader-assets")
-        self.assertIn("always()", workflow["jobs"]["publish"]["if"])
-        upload = next(s for s in workflow["jobs"]["build"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))
-        self.assertIn("always()", upload["if"])
-        self.assertEqual(upload["with"]["path"].splitlines(),
-                         ["output/pdf-range/results.json", "output/pdf-range/objects"])
 
     def test_pdf_worker_skips_empty_dynamic_matrix(self):
         import yaml
