@@ -41,6 +41,41 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertIn("objects/live", references)
         self.assertNotIn("objects/old", references)
 
+    def test_bucket_gc_expands_page_manifest_to_derived_pages(self):
+        store = Mock()
+        store.read_bytes.side_effect = lambda _bucket, path: json.dumps({
+            "kind": "pdf-pages", "page_count": 2,
+        }).encode() if path.endswith("page-manifest.json") else b"{}"
+        manifest = "objects/aa/book/pageset/page-manifest.json"
+        files = {
+            manifest,
+            "objects/aa/book/pageset/pages/page-000001.webp",
+            "objects/aa/book/pageset/pages/page-000002.webp",
+            "objects/aa/book/pageset/pages/page-000003.webp",
+        }
+        references = {manifest}
+        gc_reader_bucket.expand_reference_closure(store, files, references)
+        self.assertIn("objects/aa/book/pageset/pages/page-000001.webp", references)
+        self.assertIn("objects/aa/book/pageset/pages/page-000002.webp", references)
+        self.assertNotIn("objects/aa/book/pageset/pages/page-000003.webp", references)
+
+    def test_bucket_gc_expands_chapter_manifest_relative_paths(self):
+        store = Mock()
+        store.read_bytes.return_value = json.dumps({
+            "kind": "ebook-chapters", "chapters": [{"path": "chapters/chapter-0001.xhtml"}],
+            "search_index": {"path": "epub-search-index.json.gz"},
+        }).encode()
+        manifest = "ebook-chapters/objects/ab/book/epub-chapters/chapter-manifest.json"
+        files = {
+            manifest,
+            "ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml",
+            "ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz",
+        }
+        references = {manifest}
+        gc_reader_bucket.expand_reference_closure(store, files, references)
+        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml", references)
+        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz", references)
+
     def test_bucket_gc_tracks_explicit_staging_bucket_paths(self):
         sidecar = {"v": 1, "f": {
             "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},

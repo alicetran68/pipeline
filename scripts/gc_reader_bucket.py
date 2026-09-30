@@ -8,6 +8,7 @@ import concurrent.futures
 import gzip
 import json
 import os
+import posixpath
 from datetime import date, timedelta
 
 try:
@@ -91,7 +92,15 @@ class S3BucketStore:
         return client
 
     @staticmethod
-    def _list_level(client, bucket_name: str, prefix: str) -> tuple[set[str], set[str]]:
+    def _list_flat(client, bucket_name: str, prefix: str) -> set[str]:
+        files = set()
+        for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket_name, Prefix=prefix):
+            files.update(item["Key"] for item in page.get("Contents", []))
+        return files
+
+    @staticmethod
+    def _list_children(client, bucket_name: str, prefix: str) -> tuple[set[str], set[str]]:
         files = set()
         children = set()
         for page in client.get_paginator("list_objects_v2").paginate(
@@ -100,23 +109,41 @@ class S3BucketStore:
             children.update(item["Prefix"] for item in page.get("CommonPrefixes", []))
         return files, children
 
+    def _list_prefix(self, client, bucket_name: str, prefix: str) -> set[str]:
+        """Discover only shallow directories, then list hash shards flat."""
+        files, children = self._list_children(client, bucket_name, prefix)
+        flat_prefixes = set()
+        for child in children:
+            # ebook-chapters/ has an intermediate objects/ directory. Discover
+            # that one level, but never descend into each object hash folder.
+            if child.endswith("objects/"):
+                nested_files, nested_children = self._list_children(client, bucket_name, child)
+                files.update(nested_files)
+                flat_prefixes.update(nested_children)
+            else:
+                flat_prefixes.add(child)
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(self._list_workers, max(1, len(flat_prefixes)))) as executor:
+            results = executor.map(
+                lambda child: self._list_flat(client, bucket_name, child),
+                sorted(flat_prefixes),
+            )
+            for result in results:
+                files.update(result)
+        return files
+
     def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
         namespace, bucket_name = self._location(bucket)
         client = self._client(namespace)
-        files = set()
-        pending = set(prefixes)
-        while pending:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(self._list_workers, len(pending))) as executor:
-                results = executor.map(
-                    lambda prefix: self._list_level(client, bucket_name, prefix),
-                    sorted(pending),
-                )
-                next_pending = set()
-                for level_files, children in results:
-                    files.update(level_files)
-                    next_pending.update(children)
-            pending = next_pending
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(self._list_workers, len(prefixes))) as executor:
+            results = executor.map(
+                lambda prefix: self._list_prefix(client, bucket_name, prefix),
+                prefixes,
+            )
+            files = set()
+            for result in results:
+                files.update(result)
         return files
 
     def read_bytes(self, bucket: str, path: str) -> bytes:
@@ -248,6 +275,56 @@ def current_references(files: set[str], lifecycle: dict, payloads: dict[str, dic
     return references
 
 
+def expand_reference_closure(store: S3BucketStore, files: set[str], references: set[str]) -> None:
+    """Follow published manifests to their derived page/chapter objects."""
+    manifest_suffixes = (
+        "/page-manifest.json", "/ocr-manifest.json", "/render-manifest.json",
+        "/chapter-manifest.json",
+    )
+    pending = sorted(path for path in references
+                     if path in files and path.endswith(manifest_suffixes))
+    seen = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            raw = store.read_bytes(READER_ASSETS_BUCKET, path)
+            payload = json.loads(gzip.decompress(raw).decode("utf-8")
+                                 if raw[:2] == b"\x1f\x8b" else raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                continue
+        except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
+            raise IndexUnavailable(f"unreadable Reader object manifest: {path}")
+        before = len(references)
+        collect_paths(payload, references)
+        if path.endswith("/page-manifest.json"):
+            page_count = payload.get("page_count")
+            if not isinstance(page_count, int) or page_count < 1:
+                raise IndexUnavailable(f"invalid PDF page manifest: {path}")
+            root = posixpath.dirname(path)
+            references.update(
+                f"{root}/pages/page-{number:06d}.webp"
+                for number in range(1, page_count + 1)
+            )
+        elif path.endswith("/chapter-manifest.json"):
+            root = posixpath.dirname(path)
+            chapters = payload.get("chapters")
+            if not isinstance(chapters, list):
+                raise IndexUnavailable(f"invalid ebook chapter manifest: {path}")
+            for chapter in chapters:
+                if isinstance(chapter, dict) and isinstance(chapter.get("path"), str):
+                    references.add(posixpath.normpath(posixpath.join(root, chapter["path"])))
+            search_index = payload.get("search_index")
+            if isinstance(search_index, dict) and isinstance(search_index.get("path"), str):
+                references.add(posixpath.normpath(posixpath.join(root, search_index["path"])))
+        if len(references) != before:
+            pending.extend(sorted(path for path in references
+                                  if path in files and path.endswith(manifest_suffixes)
+                                  and path not in seen))
+
+
 def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
             include_input_bucket: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
     files = bucket_files(
@@ -259,6 +336,7 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     lifecycle = payloads.get(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
                              {"version": 1, "files": {}, "orphans": {}})
     references = current_references(files, lifecycle, payloads)
+    expand_reference_closure(store, files, references)
     asset_candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
                         if path not in references and not path.startswith(INDEX_PREFIX + "/")}
     candidates = set(asset_candidates)
