@@ -332,7 +332,8 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
 
 
 def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
-            include_input_bucket: bool = False, jxl_only: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
+            include_input_bucket: bool = False, jxl_only: bool = False,
+            jxl_inventory_only: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
     files = bucket_files(
         store, READER_ASSETS_BUCKET,
         (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
@@ -342,7 +343,8 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     lifecycle = payloads.get(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
                              {"version": 1, "files": {}, "orphans": {}})
     references = current_references(files, lifecycle, payloads)
-    expand_reference_closure(store, files, references)
+    if not jxl_inventory_only:
+        expand_reference_closure(store, files, references)
     jxl_total = sum(path.lower().endswith(".jxl") for path in files)
     jxl_referenced = sum(path.lower().endswith(".jxl") for path in references)
     asset_candidates = {f"{READER_ASSETS_BUCKET}:{path}" for path in files
@@ -370,6 +372,11 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
         asset_candidates = {path for path in asset_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
         input_candidates = {path for path in input_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
         staging_candidates = {path for path in staging_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
+    if jxl_inventory_only:
+        asset_candidates = set()
+        input_candidates = set()
+        staging_candidates = set()
+        candidates = set()
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())
     cutoff = date.today() - timedelta(days=grace_days)
     expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], READER_STAGING_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
@@ -403,13 +410,18 @@ def main() -> int:
                         help="Print every expired object path in report-only output")
     parser.add_argument("--jxl-only", action="store_true",
                         help="Restrict candidates and deletion to unreferenced JXL objects")
+    parser.add_argument("--jxl-inventory-only", action="store_true",
+                        help="Count JXL objects without reading derived manifests or deleting")
     args = parser.parse_args()
     if args.limit < 0 or args.grace_days < 0:
         raise ValueError("limit and grace-days must be non-negative")
+    if args.jxl_inventory_only and args.apply:
+        raise ValueError("jxl-inventory-only cannot be combined with apply")
     store = S3BucketStore()
     try:
         lifecycle, expired, counts = plan_gc(
-            store, args.grace_days, args.limit, args.include_input_bucket, args.jxl_only
+            store, args.grace_days, args.limit, args.include_input_bucket,
+            args.jxl_only, args.jxl_inventory_only,
         )
     except IndexUnavailable as error:
         print(f"GC skipped: {error}")

@@ -40,6 +40,11 @@ on:
         required: true
         default: false
         type: boolean
+      jxl_inventory_only:
+        description: Count JXL objects without reading derived manifests or deleting
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-assets
@@ -70,5 +75,6 @@ jobs:
           args=(--limit "${{ inputs.limit || '0' }}" --grace-days "${{ inputs.grace_days || '14' }}")
           if [[ "${{ inputs.include_input_bucket }}" == "true" ]]; then args+=(--include-input-bucket); fi
           if [[ "${{ inputs.jxl_only }}" == "true" ]]; then args+=(--jxl-only); fi
+          if [[ "${{ inputs.jxl_inventory_only }}" == "true" ]]; then args+=(--jxl-inventory-only); fi
           if [[ "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"
