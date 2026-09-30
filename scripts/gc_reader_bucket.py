@@ -50,6 +50,29 @@ def collect_paths(value, output: set[str]) -> None:
         output.add(value)
 
 
+def collect_bucket_paths(value, bucket: str, output: set[str]) -> None:
+    """Collect paths explicitly assigned to a bucket by a Reader sidecar."""
+    if isinstance(value, dict):
+        if value.get("b") == bucket:
+            for field in ("p", "path"):
+                path = value.get(field)
+                if isinstance(path, str):
+                    output.add(path)
+        if value.get("ob") == bucket:
+            path = value.get("f")
+            if isinstance(path, str):
+                output.add(path)
+        if value.get("cb") == bucket:
+            path = value.get("c")
+            if isinstance(path, str):
+                output.add(path)
+        for item in value.values():
+            collect_bucket_paths(item, bucket, output)
+    elif isinstance(value, list):
+        for item in value:
+            collect_bucket_paths(item, bucket, output)
+
+
 def bucket_files(bucket: str, token: str, prefixes: tuple[str, ...]) -> set[str]:
     files = set()
     for prefix in prefixes:
@@ -59,11 +82,10 @@ def bucket_files(bucket: str, token: str, prefixes: tuple[str, ...]) -> set[str]
 
 
 def current_references(token: str, files: set[str], lifecycle: dict) -> set[str]:
-    required = {
-        f"{INDEX_PREFIX}/manifest.json",
-        f"{INDEX_PREFIX}/reader_assets.json.gz",
-        f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
-    }
+    # The compact sidecar is the published Reader routing index. The full
+    # manifest and lifecycle file are introduced by the incremental migrator
+    # and may not exist while older published assets are being collected.
+    required = {f"{INDEX_PREFIX}/reader_assets.json.gz"}
     if not required.issubset(files):
         raise IndexUnavailable("required Reader bucket indexes are missing")
     references = {path for path in files if path.startswith(INDEX_PREFIX + "/")}
@@ -115,8 +137,16 @@ def plan_gc(token: str, grace_days: int, limit: int, include_input_bucket: bool 
                    if include_input_bucket else set())
     input_references = {path for path in references if "/ocr-input/" in path or path.endswith(".jxl")}
     candidates.update(f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files if path not in input_references)
-    staging_files = bucket_files(READER_STAGING_BUCKET, token, ("staging/",))
-    staging_references = {path for path in references if path.startswith("staging/pdf/")}
+    staging_files = bucket_files(READER_STAGING_BUCKET, token, ("objects/", "staging/"))
+    staging_references: set[str] = set()
+    for path in registry_paths:
+        try:
+            raw = read_bytes(path, token)
+            payload = decode_sidecar(raw) if path.endswith(".json.gz") else json.loads(raw.decode("utf-8"))
+            collect_bucket_paths(payload, READER_STAGING_BUCKET, staging_references)
+        except (OSError, ValueError, json.JSONDecodeError, gzip.BadGzipFile):
+            raise IndexUnavailable(f"unreadable Reader bucket index: {path}")
+    staging_references.update(path for path in references if path.startswith("staging/pdf/"))
     candidates.update(f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
                      if path not in staging_references)
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())

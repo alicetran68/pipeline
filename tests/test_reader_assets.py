@@ -28,6 +28,26 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 0), ["a", "b", "c"])
         self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 2), ["a", "b"])
 
+    def test_bucket_gc_can_use_existing_compact_sidecar_without_new_indexes(self):
+        sidecar = gzip.compress(json.dumps({"v": 1, "f": {
+            "live": {"s": 2, "p": "objects/live", "b": "vomebook/pdf-pages"},
+            "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},
+        }}).encode())
+        with patch.object(gc_reader_bucket, "read_bytes", return_value=sidecar):
+            references = gc_reader_bucket.current_references(
+                "token", {"reader-index/reader_assets.json.gz", "objects/live", "objects/old"}, {}
+            )
+        self.assertIn("objects/live", references)
+        self.assertNotIn("objects/old", references)
+
+    def test_bucket_gc_tracks_explicit_staging_bucket_paths(self):
+        sidecar = {"v": 1, "f": {
+            "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},
+        }}
+        references = set()
+        gc_reader_bucket.collect_bucket_paths(sidecar, "vomebook/pdf-optimized", references)
+        self.assertEqual(references, {"objects/optimized"})
+
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
