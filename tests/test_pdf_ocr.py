@@ -61,6 +61,49 @@ class PdfOcrContractTests(unittest.TestCase):
     def test_default_ocr_target_reduces_model_startup_shards(self):
         self.assertEqual(DEFAULT_OCR_TARGET_PAGES_PER_SHARD, 2000)
 
+    def test_probe_pdf_batches_text_pages_without_changing_per_page_counts(self):
+        def run(command, **_kwargs):
+            if command[0] == "pdfinfo":
+                return "Pages: 3\n"
+            self.assertEqual(command[0], "pdftotext")
+            self.assertEqual(command[command.index("-f") + 1], "1")
+            self.assertEqual(command[command.index("-l") + 1], "3")
+            return "第一 页\fEnglish text\f\f"
+
+        with patch.object(pdf_ocr, "_run", side_effect=run) as execute:
+            probe = pdf_ocr.probe_pdf(Path("sample.pdf"))
+        self.assertEqual(probe["page_chars"], [3, 11, 0])
+        self.assertEqual(probe["classification"], "scan")
+        self.assertEqual(sum(call.args[0][0] == "pdftotext" for call in execute.call_args_list), 1)
+
+    def test_native_page_batch_preserves_page_text_and_boxes(self):
+        page = ('<page width="200" height="300"><flow><block><line yMin="10" yMax="20">'
+                '<word xMin="20" yMin="10" xMax="80" yMax="20">正文</word>'
+                '</line></block></flow></page>')
+
+        with patch.object(pdf_ocr, "_run", return_value=page + page) as execute:
+            pages = pdf_ocr.native_pages(Path("sample.pdf"), [1, 2], batch_size=2)
+
+        self.assertEqual([pages[number]["text"] for number in (1, 2)], ["正文", "正文"])
+        self.assertEqual(pages[1]["blocks"], pages[2]["blocks"])
+        self.assertEqual(pages[1]["blocks"][0]["b"], [0.1, 1 / 30, 0.4, 1 / 15])
+        execute.assert_called_once()
+
+    def test_native_page_batch_falls_back_to_single_pages_on_invalid_range(self):
+        page = '<page width="100" height="100"></page>'
+
+        def run(command, **_kwargs):
+            start, end = int(command[command.index("-f") + 1]), int(command[command.index("-l") + 1])
+            if end - start:
+                return page
+            return page
+
+        with patch.object(pdf_ocr, "_run", side_effect=run) as execute:
+            pages = pdf_ocr.native_pages(Path("sample.pdf"), [1, 2], batch_size=2)
+
+        self.assertEqual(set(pages), {1, 2})
+        self.assertEqual(execute.call_count, 3)
+
     def test_manifest_rejects_non_object_paths(self):
         manifest = {"version": 1, "files": {"x": {
             "status": "ready", "profile": pdf_ocr.asset_profile(),

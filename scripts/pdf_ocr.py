@@ -82,6 +82,8 @@ NATIVE_PAGE_RATIO = float(os.environ.get("PDF_OCR_NATIVE_PAGE_RATIO", "0.90"))
 MAX_PAGE_PIXELS = int(os.environ.get("PDF_OCR_MAX_PAGE_PIXELS", "50000000"))
 COMMAND_TIMEOUT = int(os.environ.get("PDF_OCR_COMMAND_TIMEOUT", "600"))
 OCR_TIMEOUT = int(os.environ.get("PDF_OCR_PAGE_TIMEOUT", "300"))
+TEXT_PROBE_BATCH_PAGES = 100
+NATIVE_TEXT_BATCH_PAGES = 50
 MI = 1024 * 1024
 OCR_OBJECT_PATH_RE = re.compile(
     r"^objects/[0-9a-f]{2}/[0-9a-f]{64}/[0-9a-f]{16}/"
@@ -206,21 +208,21 @@ def clean_text(value: str) -> str:
 class _BBoxParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.words: list[dict] = []
-        self.page_width = 0.0
-        self.page_height = 0.0
+        self.pages: list[dict] = []
+        self._page: dict | None = None
         self._word: dict | None = None
         self._parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
         attrs = dict(attrs)
         if tag == "page":
-            self.page_width = float(attrs.get("width") or 0)
-            self.page_height = float(attrs.get("height") or 0)
+            self._page = {"width": float(attrs.get("width") or 0),
+                          "height": float(attrs.get("height") or 0), "words": []}
+            self.pages.append(self._page)
         elif tag == "word":
             self._word = {
-                "x0": float(attrs.get("xMin") or 0), "y0": float(attrs.get("yMin") or 0),
-                "x1": float(attrs.get("xMax") or 0), "y1": float(attrs.get("yMax") or 0),
+                "x0": float(attrs.get("xmin") or 0), "y0": float(attrs.get("ymin") or 0),
+                "x1": float(attrs.get("xmax") or 0), "y1": float(attrs.get("ymax") or 0),
             }
             self._parts = []
 
@@ -231,19 +233,17 @@ class _BBoxParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "word" and self._word is not None:
             text = clean_text("".join(self._parts))
-            if text:
-                self.words.append({**self._word, "text": text, "confidence": 1.0, "source": "native"})
+            if text and self._page is not None:
+                self._page["words"].append(
+                    {**self._word, "text": text, "confidence": 1.0, "source": "native"})
             self._word = None
             self._parts = []
+        elif tag == "page":
+            self._page = None
 
 
-def native_page(path: Path, page: int) -> dict:
-    """Extract words and coordinates from the PDF text layer."""
-    raw = _run(["pdftotext", "-bbox-layout", "-f", str(page), "-l", str(page), str(path), "-"])
-    parser = _BBoxParser()
-    parser.feed(raw)
-    words = parser.words
-    # pdftotext's y origin is top-left, matching the browser overlay.
+def _native_page_result(page: int, parsed: dict) -> dict:
+    words = parsed["words"]
     lines: list[str] = []
     previous_y = None
     current: list[str] = []
@@ -259,9 +259,51 @@ def native_page(path: Path, page: int) -> dict:
     text = "\n".join(lines).strip()
     return {
         "page": page, "status": "ready", "source": "native", "text": text,
-        "blocks": normalize_blocks(words, parser.page_width, parser.page_height),
-        "width": parser.page_width, "height": parser.page_height,
+        "blocks": normalize_blocks(words, parsed["width"], parsed["height"]),
+        "width": parsed["width"], "height": parsed["height"],
     }
+
+
+def _native_pages_single(path: Path, start: int, end: int) -> dict[int, dict]:
+    raw = _run(["pdftotext", "-bbox-layout", "-f", str(start), "-l", str(end), str(path), "-"])
+    parser = _BBoxParser()
+    parser.feed(raw)
+    if len(parser.pages) != end - start + 1:
+        raise RuntimeError("pdftotext returned an incomplete page range")
+    return {number: _native_page_result(number, parsed)
+            for number, parsed in zip(range(start, end + 1), parser.pages)}
+
+
+def native_pages(path: Path, pages, batch_size: int = NATIVE_TEXT_BATCH_PAGES) -> dict[int, dict]:
+    """Extract native text and coordinates in bounded Poppler process batches."""
+    numbers = sorted(set(int(page) for page in pages))
+    if not numbers:
+        return {}
+    if batch_size < 1 or numbers[0] < 1:
+        raise ValueError("invalid native page batch")
+    output = {}
+    index = 0
+    while index < len(numbers):
+        start = end = numbers[index]
+        index += 1
+        while index < len(numbers) and numbers[index] == end + 1 and end - start + 1 < batch_size:
+            end = numbers[index]
+            index += 1
+        try:
+            output.update(_native_pages_single(path, start, end))
+        except (RuntimeError, OSError):
+            # Preserve per-page recovery when one malformed page breaks a batch.
+            for page in range(start, end + 1):
+                try:
+                    output.update(_native_pages_single(path, page, page))
+                except (RuntimeError, OSError):
+                    raise
+    return output
+
+
+def native_page(path: Path, page: int) -> dict:
+    """Extract words and coordinates from one PDF text page."""
+    return native_pages(path, [page], batch_size=1)[page]
 
 
 def page_text_probe(path: Path, page: int) -> int:
@@ -269,14 +311,30 @@ def page_text_probe(path: Path, page: int) -> int:
     return len(re.sub(r"\s+", "", clean_text(raw)))
 
 
+def _split_text_pages(raw: str, expected: int) -> list[str]:
+    pages = raw.split("\f")
+    if raw.endswith("\f"):
+        pages.pop()
+    if len(pages) != expected:
+        raise ValueError("pdftotext returned an incomplete text page range")
+    return pages
+
+
 def probe_pdf(path: Path) -> dict:
     page_count = pdf_page_count(path)
     page_chars = []
-    for page in range(1, page_count + 1):
+    for start in range(1, page_count + 1, TEXT_PROBE_BATCH_PAGES):
+        end = min(page_count, start + TEXT_PROBE_BATCH_PAGES - 1)
         try:
-            page_chars.append(page_text_probe(path, page))
-        except RuntimeError:
-            page_chars.append(0)
+            raw = _run(["pdftotext", "-f", str(start), "-l", str(end), "-enc", "UTF-8", str(path), "-"])
+            text_pages = _split_text_pages(raw, end - start + 1)
+            page_chars.extend(len(re.sub(r"\s+", "", clean_text(text))) for text in text_pages)
+        except (RuntimeError, ValueError, OSError):
+            for page in range(start, end + 1):
+                try:
+                    page_chars.append(page_text_probe(path, page))
+                except (RuntimeError, OSError):
+                    page_chars.append(0)
     native_pages = sum(chars >= MIN_NATIVE_PAGE_CHARS for chars in page_chars)
     ratio = native_pages / page_count
     if native_pages == page_count:

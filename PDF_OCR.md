@@ -16,6 +16,10 @@ the shared `reader-assets` publication lock.
   current; they are not rebuilt solely to populate the PNG cache.
 - Pure native-text PDFs retain their PDF text layer. Mixed PDFs get extracted
   native text JSON on native pages and PNG inputs for recognition on scan pages.
+- Poppler text probing processes up to 100 pages per subprocess, and native
+  text/coordinate extraction processes up to 50 contiguous pages per subprocess.
+  If a batch is malformed, extraction falls back to individual pages so one
+  problematic page does not hide valid pages in the same batch.
 - When structural PDF optimization has failed, native-text PDFs also receive a
   Reader page stream while keeping the extracted native text and v2 full-text
   index; these pages are not sent to OCR. Previously completed text-only render

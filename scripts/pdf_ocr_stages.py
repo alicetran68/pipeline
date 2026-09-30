@@ -421,12 +421,18 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
     scan_images = (pdf_ocr.scan_reader_images(source, first, last)
                    if any(chars == 0 for chars in probe["page_chars"][first - 1:last])
                    else {})
+    native_text = {}
+    if not lin_native:
+        native_numbers = [number for number in range(first, last + 1)
+                          if probe["classification"] == "native-text"
+                          or probe["page_chars"][number - 1] >= pdf_ocr.MIN_NATIVE_PAGE_CHARS]
+        native_text = pdf_ocr.native_pages(source, native_numbers)
     page_started = time.perf_counter()
     with tempfile.TemporaryDirectory(dir=bundle) as temp, (
             lin_pdf_text.pymupdf.open(source) if lin_native else nullcontext(None)) as document:
         for number in range(item.get("start", 1), item.get("end", probe["page_count"]) + 1):
             if probe["classification"] == "native-text" and not force_image_render:
-                text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)
+                text = lin_pdf_text.extract(document, number) if lin_native else native_text[number]
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
                 if not lin_native:
@@ -456,7 +462,7 @@ def render_book(item: dict, source: Path, bundle: Path) -> dict:
                 pdf_ocr.encode_jxl(reader_png if reader_png.is_file() else bundle / page["i"], jxl)
                 set_page_meta(page, "j", metadata(jxl, bundle))
             if native:
-                text = lin_pdf_text.extract(document, number) if lin_native else pdf_ocr.native_page(source, number)
+                text = lin_pdf_text.extract(document, number) if lin_native else native_text[number]
                 payload = pdf_ocr.page_payload(number, text["width"], text["height"], text["blocks"], "native")
                 payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], {}))
                 if not lin_native:

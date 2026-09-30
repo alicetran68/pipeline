@@ -59,8 +59,9 @@ class PdfOcrStagesTests(unittest.TestCase):
         with patch.object(pdf_ocr, "render_page", side_effect=render), \
                 patch.object(pdf_ocr, "JXL_ENABLED", jxl), \
                 patch.object(pdf_ocr, "encode_jxl", side_effect=encode), \
-                patch.object(pdf_ocr, "native_page", return_value={"width": 200, "height": 300,
-                             "blocks": [], "text": "原生文字"}), \
+                patch.object(pdf_ocr, "native_pages", side_effect=lambda _source, pages: {
+                    page: {"width": 200, "height": 300, "blocks": [], "text": "原生文字"}
+                    for page in pages}), \
                 patch.object(pdf_ocr, "ocr_page", side_effect=AssertionError("renderer must not OCR")):
             result = stages.render_book(item, source, bundle)
         self.store(bundle)
@@ -110,8 +111,9 @@ class PdfOcrStagesTests(unittest.TestCase):
                 "profile": pdf_ocr.asset_profile(), "render_profile": stages.render_profile()}
         old = {**item, "start": 1, "end": 2}
         old["force_image_render"] = False
-        with patch.object(pdf_ocr, "native_page", return_value={"width": 200, "height": 300,
-                 "blocks": [], "text": "原生文字"}):
+        with patch.object(pdf_ocr, "native_pages", side_effect=lambda _source, pages: {
+                page: {"width": 200, "height": 300, "blocks": [], "text": "原生文字"}
+                for page in pages}):
             result = stages.render_book(old, source, self.root / "old-range")
         self.store(self.root / "old-range")
         progress = {item["key"]: {**stages.range_identity(item),
@@ -558,7 +560,8 @@ class PdfOcrStagesTests(unittest.TestCase):
                     "blocks": [{"t": "竖排正文", "b": [.7, .1, .75, .5], "c": 1, "s": "native"}],
                     "text": f"竖排正文{page}"}
         with patch.object(pdf_ocr, "render_page", side_effect=AssertionError("native PDF must not render")), \
-                patch.object(pdf_ocr, "native_page", side_effect=native):
+                patch.object(pdf_ocr, "native_pages", side_effect=lambda _source, pages: {
+                    page: native(_source, page) for page in pages}):
             result = stages.render_book(item, source, bundle)
         self.assertIsNone(result["page_manifest"])
         self.store(bundle)
