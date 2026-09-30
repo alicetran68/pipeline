@@ -59,7 +59,7 @@ class S3BucketStore:
         self._input_bucket = os.environ.get("HF_S3_INPUT_BUCKET", PDF_OCR_INPUT_BUCKET)
         try:
             self._list_workers = max(1, int(os.environ.get("HF_S3_LIST_WORKERS", "16")))
-            self._manifest_workers = max(1, int(os.environ.get("HF_S3_MANIFEST_WORKERS", "4")))
+            self._manifest_workers = max(1, int(os.environ.get("HF_S3_MANIFEST_WORKERS", "16")))
         except ValueError as error:
             raise RuntimeError("HF_S3_LIST_WORKERS and HF_S3_MANIFEST_WORKERS must be positive integers") from error
         self._clients = {}
