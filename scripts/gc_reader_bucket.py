@@ -332,7 +332,7 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
 
 
 def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
-            include_input_bucket: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
+            include_input_bucket: bool = False, jxl_only: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
     files = bucket_files(
         store, READER_ASSETS_BUCKET,
         (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
@@ -363,6 +363,11 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     staging_candidates = {f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
                           if path not in staging_references}
     candidates.update(staging_candidates)
+    if jxl_only:
+        candidates = {path for path in candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
+        asset_candidates = {path for path in asset_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
+        input_candidates = {path for path in input_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
+        staging_candidates = {path for path in staging_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())
     cutoff = date.today() - timedelta(days=grace_days)
     expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], READER_STAGING_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
@@ -392,12 +397,16 @@ def main() -> int:
                         help="Also scan the OCR PNG/JXL input bucket after its migration is complete")
     parser.add_argument("--show-paths", action="store_true",
                         help="Print every expired object path in report-only output")
+    parser.add_argument("--jxl-only", action="store_true",
+                        help="Restrict candidates and deletion to unreferenced JXL objects")
     args = parser.parse_args()
     if args.limit < 0 or args.grace_days < 0:
         raise ValueError("limit and grace-days must be non-negative")
     store = S3BucketStore()
     try:
-        lifecycle, expired, counts = plan_gc(store, args.grace_days, args.limit, args.include_input_bucket)
+        lifecycle, expired, counts = plan_gc(
+            store, args.grace_days, args.limit, args.include_input_bucket, args.jxl_only
+        )
     except IndexUnavailable as error:
         print(f"GC skipped: {error}")
         return 0

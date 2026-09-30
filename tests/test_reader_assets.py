@@ -84,6 +84,18 @@ class ReaderAssetContractTests(unittest.TestCase):
         gc_reader_bucket.collect_bucket_paths(sidecar, "vomebook/pdf-optimized", references)
         self.assertEqual(references, {"objects/optimized"})
 
+    def test_bucket_gc_jxl_only_filters_candidates_without_touching_other_assets(self):
+        store = Mock()
+        store.list_files.side_effect = [
+            {"reader-index/reader_assets.json.gz", "objects/a/page.webp", "objects/b/old.jxl"},
+            set(),
+        ]
+        sidecar = gzip.compress(json.dumps({"v": 1, "f": {}}).encode())
+        store.read_bytes.return_value = sidecar
+        updated, expired, counts = gc_reader_bucket.plan_gc(store, 0, 0, jxl_only=True)
+        self.assertEqual(counts[reader_assets.READER_ASSETS_BUCKET], 1)
+        self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/old.jxl"])
+
     def test_bucket_gc_can_use_separate_input_account_credentials(self):
         class FakeBoto3:
             def __init__(self):

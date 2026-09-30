@@ -35,6 +35,11 @@ on:
         required: true
         default: "melsm"
         type: string
+      jxl_only:
+        description: Restrict candidates and deletion to unreferenced JXL objects
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-assets
@@ -64,5 +69,6 @@ jobs:
           [[ "${{ inputs.grace_days || '14' }}" =~ ^[0-9]+$ ]] || exit 1
           args=(--limit "${{ inputs.limit || '0' }}" --grace-days "${{ inputs.grace_days || '14' }}")
           if [[ "${{ inputs.include_input_bucket }}" == "true" ]]; then args+=(--include-input-bucket); fi
+          if [[ "${{ inputs.jxl_only }}" == "true" ]]; then args+=(--jxl-only); fi
           if [[ "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"
