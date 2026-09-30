@@ -25,6 +25,16 @@ on:
         required: true
         default: false
         type: boolean
+      input_namespace:
+        description: Namespace containing the optional OCR input bucket
+        required: true
+        default: "vomebook"
+        type: string
+      input_bucket:
+        description: Name of the optional OCR input bucket
+        required: true
+        default: "melsm"
+        type: string
 
 concurrency:
   group: reader-assets
@@ -45,9 +55,9 @@ jobs:
           HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_NAMESPACE: ${{ vars.HF_S3_NAMESPACE || 'vomebook' }}
-          HF_S3_INPUT_NAMESPACE: ${{ vars.HF_S3_INPUT_NAMESPACE || vars.HF_S3_NAMESPACE || 'vomebook' }}
-          HF_S3_INPUT_BUCKET: ${{ vars.HF_S3_INPUT_BUCKET || 'melsm' }}
-          PDF_OCR_INPUT_BUCKET: ${{ vars.HF_S3_INPUT_BUCKET || 'melsm' }}
+          HF_S3_INPUT_NAMESPACE: ${{ inputs.input_namespace || vars.HF_S3_INPUT_NAMESPACE || vars.HF_S3_NAMESPACE || 'vomebook' }}
+          HF_S3_INPUT_BUCKET: ${{ inputs.input_bucket || vars.HF_S3_INPUT_BUCKET || 'melsm' }}
+          PDF_OCR_INPUT_BUCKET: ${{ inputs.input_bucket || vars.HF_S3_INPUT_BUCKET || 'melsm' }}
         run: |
           [[ "${{ inputs.grace_days || '14' }}" =~ ^[0-9]+$ ]] || exit 1
           args=(--limit "${{ inputs.limit || '0' }}" --grace-days "${{ inputs.grace_days || '14' }}")
