@@ -15,9 +15,6 @@ on:
         description: Retry failed rendering for unchanged sources
         default: true
         type: boolean
-  schedule:
-    - cron: "*/15 * * * *"
-
 permissions:
   contents: read
   actions: read

@@ -23,9 +23,6 @@ on:
         description: Publish existing render artifacts from this main-branch render run (no rendering)
         default: ""
         type: string
-  schedule:
-    - cron: "13 * * * *"
-
 permissions:
   contents: read
   actions: read

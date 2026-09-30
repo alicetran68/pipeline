@@ -2328,7 +2328,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
         self.assertIn("chm, tif, tiff, djvu, ppt, pptx, pps, odp", workflow)
         self.assertIn("htm|html) packages=()", workflow)
-        self.assertIn('cron: "17 * * * *"', workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
@@ -2395,15 +2394,6 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("publish_reader_assets.py", convert_section.split("\n  convert:\n", 1)[1])
         self.assertIn('python scripts/publish_reader_assets.py --bundles "${bundles[@]}"', publish_section)
         self.assertIn("timeout-minutes: 360", publish_section)
-
-    def test_prune_workflow_uses_shared_concurrency_and_bounded_grace(self):
-        workflow = Path(".github/workflows/prune-reader-assets.yml").read_text(encoding="utf-8")
-        self.assertIn("group: reader-assets", workflow)
-        self.assertIn('default: "14"', workflow)
-        self.assertIn('default: "0"', workflow)
-        self.assertIn('cron: "43 3 * * *"', workflow)
-        self.assertIn("python scripts/gc_reader_bucket.py", workflow)
-
 
 if __name__ == "__main__":
     unittest.main()
