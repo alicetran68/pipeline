@@ -333,7 +333,8 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
 
 def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
             include_input_bucket: bool = False, jxl_only: bool = False,
-            jxl_inventory_only: bool = False) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
+            jxl_inventory_only: bool = False, force_jxl_delete: bool = False
+            ) -> tuple[dict, dict[str, list[str]], dict[str, int]]:
     files = bucket_files(
         store, READER_ASSETS_BUCKET,
         (INDEX_PREFIX + "/", "objects/", "ebook-chapters/", "staging/"),
@@ -343,7 +344,7 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     lifecycle = payloads.get(f"{INDEX_PREFIX}/{LIFECYCLE_NAME}",
                              {"version": 1, "files": {}, "orphans": {}})
     references = current_references(files, lifecycle, payloads)
-    if not jxl_inventory_only:
+    if not jxl_inventory_only and not force_jxl_delete:
         expand_reference_closure(store, files, references)
     jxl_total = sum(path.lower().endswith(".jxl") for path in files)
     jxl_referenced = sum(path.lower().endswith(".jxl") for path in references)
@@ -377,6 +378,11 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
         input_candidates = set()
         staging_candidates = set()
         candidates = set()
+    if force_jxl_delete:
+        candidates = {
+            f"{READER_ASSETS_BUCKET}:{path}" for path in files
+            if path.lower().endswith(".jxl")
+        }
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())
     cutoff = date.today() - timedelta(days=grace_days)
     expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], READER_STAGING_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
@@ -412,16 +418,20 @@ def main() -> int:
                         help="Restrict candidates and deletion to unreferenced JXL objects")
     parser.add_argument("--jxl-inventory-only", action="store_true",
                         help="Count JXL objects without reading derived manifests or deleting")
+    parser.add_argument("--force-jxl-delete", action="store_true",
+                        help="Delete every JXL object in vomebook/pdf-pages; requires --apply")
     args = parser.parse_args()
     if args.limit < 0 or args.grace_days < 0:
         raise ValueError("limit and grace-days must be non-negative")
-    if args.jxl_inventory_only and args.apply:
+    if args.jxl_inventory_only and args.apply and not args.force_jxl_delete:
         raise ValueError("jxl-inventory-only cannot be combined with apply")
+    if args.force_jxl_delete and not args.apply:
+        raise ValueError("force-jxl-delete requires apply")
     store = S3BucketStore()
     try:
         lifecycle, expired, counts = plan_gc(
             store, args.grace_days, args.limit, args.include_input_bucket,
-            args.jxl_only, args.jxl_inventory_only,
+            args.jxl_only, args.jxl_inventory_only, args.force_jxl_delete,
         )
     except IndexUnavailable as error:
         print(f"GC skipped: {error}")

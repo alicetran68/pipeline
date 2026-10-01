@@ -98,6 +98,19 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertEqual(counts["__jxl_total"], 1)
         self.assertEqual(counts["__jxl_referenced"], 0)
 
+    def test_bucket_gc_force_jxl_delete_selects_only_reader_jxl(self):
+        store = Mock()
+        store.list_files.side_effect = [
+            {"reader-index/reader_assets.json.gz", "objects/a/live.webp", "objects/b/live.jxl"},
+            {"objects/c/staging.jxl"},
+        ]
+        store.read_bytes.return_value = gzip.compress(json.dumps({"v": 1, "f": {}}).encode())
+        _updated, expired, _counts = gc_reader_bucket.plan_gc(
+            store, 0, 0, force_jxl_delete=True
+        )
+        self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/live.jxl"])
+        self.assertEqual(expired[reader_assets.READER_STAGING_BUCKET], [])
+
     def test_bucket_gc_can_use_separate_input_account_credentials(self):
         class FakeBoto3:
             def __init__(self):

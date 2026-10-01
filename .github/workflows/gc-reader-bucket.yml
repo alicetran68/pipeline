@@ -45,6 +45,11 @@ on:
         required: true
         default: false
         type: boolean
+      force_jxl_delete:
+        description: DANGER delete every JXL object in vomebook/pdf-pages
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-assets
@@ -76,5 +81,6 @@ jobs:
           if [[ "${{ inputs.include_input_bucket }}" == "true" ]]; then args+=(--include-input-bucket); fi
           if [[ "${{ inputs.jxl_only }}" == "true" ]]; then args+=(--jxl-only); fi
           if [[ "${{ inputs.jxl_inventory_only }}" == "true" ]]; then args+=(--jxl-inventory-only); fi
+          if [[ "${{ inputs.force_jxl_delete }}" == "true" ]]; then args+=(--force-jxl-delete); fi
           if [[ "${{ inputs.apply }}" == "true" ]]; then args+=(--apply); fi
           python scripts/gc_reader_bucket.py "${args[@]}"
