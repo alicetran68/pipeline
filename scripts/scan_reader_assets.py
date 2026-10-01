@@ -84,7 +84,15 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             continue
         profile, reader_mode, output_name = contract
         existing = files.get(key, {})
-        if bucket_migrate and existing.get("status") == "ready" and existing.get("bucket") == READER_ASSETS_BUCKET:
+        chapter_path = existing.get("chapter_manifest") if isinstance(existing, dict) else None
+        chapter_bucket_path_missing_prefix = (
+            existing.get("chapter_bucket") == READER_ASSETS_BUCKET
+            and isinstance(chapter_path, str)
+            and not chapter_path.startswith("ebook-chapters/")
+        )
+        if (bucket_migrate and existing.get("status") == "ready"
+                and existing.get("bucket") == READER_ASSETS_BUCKET
+                and not chapter_bucket_path_missing_prefix):
             continue
         manual = str(existing.get("profile") or "").startswith("manual-")
         if not force and existing.get("status") == "ready" and manual:

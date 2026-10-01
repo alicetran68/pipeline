@@ -45,6 +45,16 @@ except ImportError:
 SIDECAR_NAME = "reader_assets.json.gz"
 BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "epub"}
 BUCKET_STAGING_MODES = {"pdf"}
+EBOOK_CHAPTERS_PREFIX = "ebook-chapters/"
+
+
+def bucket_chapter_path(path: str) -> str:
+    """Store chapter bundles under the namespace accepted by Reader APIs."""
+    return path if path.startswith(EBOOK_CHAPTERS_PREFIX) else EBOOK_CHAPTERS_PREFIX + path
+
+
+def local_chapter_path(path: str) -> str:
+    return path[len(EBOOK_CHAPTERS_PREFIX):] if path.startswith(EBOOK_CHAPTERS_PREFIX) else path
 
 
 def bundle_is_published(manifest: dict, data: dict) -> bool:
@@ -60,6 +70,8 @@ def bundle_is_published(manifest: dict, data: dict) -> bool:
                           "reader_mode", "path", "bytes", "sha256", "chapter_manifest",
                           "chapter_bundle_profile", "chapter_bundle_error", "fallback_path"):
                 expected = result.get(field)
+                if field == "chapter_manifest" and data.get("bucket_migration") and expected:
+                    expected = bucket_chapter_path(expected)
                 if current.get(field) != expected:
                     return False
             if result.get("bucket") is not None and current.get("bucket") != result.get("bucket"):
@@ -79,9 +91,11 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
             paths.add(result["path"])
         if result.get("chapter_manifest"):
             if bundle is not None:
-                root = bundle / Path(result["chapter_manifest"]).parent
+                local_manifest = local_chapter_path(result["chapter_manifest"])
+                remote_prefix = Path(bucket_chapter_path(result["chapter_manifest"])).parent
+                root = bundle / Path(local_manifest).parent
                 if root.is_dir():
-                    paths.update((Path(result["chapter_manifest"]).parent / item.relative_to(root)).as_posix()
+                    paths.update((remote_prefix / item.relative_to(root)).as_posix()
                                  for item in root.rglob("*") if item.is_file())
     return sorted(paths)
 
@@ -156,15 +170,18 @@ def artifact_files(data: dict, roots: dict[str, Path]) -> dict[str, tuple[Path, 
             artifacts[path] = (root, str(artifact))
         if result.get("chapter_manifest"):
             chapter_path = result["chapter_manifest"]
-            chapter_prefix = Path(chapter_path).parent
-            chapter_root = roots.get(chapter_path, root) / chapter_prefix
+            local_manifest = local_chapter_path(chapter_path)
+            local_prefix = Path(local_manifest).parent
+            remote_prefix = Path(bucket_chapter_path(chapter_path)).parent
+            chapter_root = roots.get(chapter_path, root) / local_prefix
             if not chapter_root.is_dir():
                 raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
             for child in sorted(chapter_root.rglob("*")):
                 if child.is_file():
-                    relative = (chapter_prefix / child.relative_to(chapter_root)).as_posix()
+                    relative = (remote_prefix / child.relative_to(chapter_root)).as_posix()
                     validate_storage_path(relative)
-                    artifacts[relative] = (root, str(root / relative))
+                    local_relative = (local_prefix / child.relative_to(chapter_root)).as_posix()
+                    artifacts[relative] = (root, str(root / local_relative))
     return artifacts
 
 
@@ -430,13 +447,15 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                     raise ValueError(f"artifact digest mismatch for {result['key']}")
                 artifacts[result["path"]] = str(artifact)
                 if result.get("chapter_manifest"):
-                    prefix = Path(result["chapter_manifest"]).parent
-                    root = artifact_roots.get(result["chapter_manifest"], bundle) / prefix
+                    local_manifest = local_chapter_path(result["chapter_manifest"])
+                    local_prefix = Path(local_manifest).parent
+                    remote_prefix = Path(bucket_chapter_path(result["chapter_manifest"])).parent
+                    root = artifact_roots.get(result["chapter_manifest"], bundle) / local_prefix
                     if not root.is_dir():
                         raise ValueError(f"missing EPUB chapter bundle for {result['key']}")
                     for child in sorted(root.rglob("*")):
                         if child.is_file():
-                            path = (prefix / child.relative_to(root)).as_posix()
+                            path = (remote_prefix / child.relative_to(root)).as_posix()
                             validate_storage_path(path)
                             artifacts[path] = str(child)
             if result.get("reader_mode") in BUCKET_READER_MODES:
@@ -445,6 +464,8 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                 entry["bucket"] = READER_STAGING_BUCKET
                 entry["bucket_staging"] = True
             if result.get("chapter_manifest"):
+                if data.get("bucket_migration"):
+                    entry["chapter_manifest"] = bucket_chapter_path(result["chapter_manifest"])
                 entry["chapter_bucket"] = READER_ASSETS_BUCKET
         elif result.get("status") != "failed":
             raise ValueError("unknown reader asset result status")

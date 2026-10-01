@@ -237,7 +237,20 @@ class ReaderAssetContractTests(unittest.TestCase):
                     "version": 1,
                     "files": {"key": {"status": "ready", "path": "objects/a/document.epub",
                                        "reader_mode": "foliate", "chapter_manifest": path}},
-                })
+                 })
+
+    def test_legacy_bucket_chapter_manifest_remains_loadable_for_repair(self):
+        base = {"status": "ready", "path": "objects/aa/document.epub", "reader_mode": "foliate"}
+        manifest = reader_assets.empty_manifest()
+        manifest["files"]["key"] = {
+            **base, "chapter_manifest": "objects/aa/epub-chapters/chapter-manifest.json",
+            "chapter_bucket": reader_assets.READER_ASSETS_BUCKET,
+        }
+        self.assertIs(reader_assets.validate_manifest(manifest), manifest)
+        manifest["files"]["key"]["chapter_manifest"] = (
+            "ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json"
+        )
+        self.assertIs(reader_assets.validate_manifest(manifest), manifest)
 
     def test_passwords_require_an_explicit_marker_or_known_source(self):
         self.assertEqual(reader_assets.source_password("repo", "资料〔密码：123〕.docx"), "123")
@@ -460,6 +473,23 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scan_reader_assets.build_queue(
             self.records[:1], self.revisions, manifest, bucket_migrate=True,
         ), [])
+
+    def test_bucket_migration_repairs_legacy_chapter_path_without_force_rebuild(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "epub",
+                  "Folder": [], "Size": 100}
+        key = reader_assets.asset_key(record["Repo"], "Book.epub")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate",
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
+            "path": "objects/aa/document.epub",
+            "chapter_manifest": "objects/aa/epub-chapters/chapter-manifest.json",
+            "chapter_bucket": reader_assets.READER_ASSETS_BUCKET,
+        }}}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, manifest, bucket_migrate=True,
+        )
+        self.assertEqual([item["key"] for item in queue], [key])
+        self.assertFalse(queue[0].get("force_rebuild", False))
 
     def test_large_epub_without_chapters_is_requeued_for_upgrade(self):
         records = [{
@@ -1904,6 +1934,39 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(publish_reader_assets.bucket_paths(data), [
             "objects/aa/document.docx", "objects/bb/document.html", "objects/cc/document.epub",
         ])
+
+    def test_bucket_chapter_artifacts_and_manifest_use_ebook_prefix(self):
+        chapter_manifest = "objects/aa/epub-chapters/chapter-manifest.json"
+        data = {"version": 1, "bucket_migration": True, "results": [{
+            "key": "VoiceOfML/Test\0book.epub", "status": "ready", "source_revision": "rev",
+            "source_sha256": "a" * 64, "source_bytes": 1, "source_extension": "epub",
+            "profile": "foliate-original-v1", "reader_mode": "foliate",
+            "path": "objects/aa/document.epub", "bytes": 5,
+            "sha256": hashlib.sha256(b"epub!").hexdigest(),
+            "chapter_manifest": chapter_manifest,
+        }]}
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root)
+            (bundle / "objects/aa").mkdir(parents=True)
+            (bundle / "objects/aa/document.epub").write_bytes(b"epub!")
+            chapter_root = bundle / "objects/aa/epub-chapters"
+            (chapter_root / "chapters").mkdir(parents=True)
+            (chapter_root / "chapter-manifest.json").write_text("{}", encoding="utf-8")
+            (chapter_root / "chapters/chapter-0001.xhtml").write_text("<html/>", encoding="utf-8")
+            artifacts = publish_reader_assets.artifact_files(data, {
+                chapter_manifest: bundle, "objects/aa/document.epub": bundle,
+            })
+            self.assertIn("ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json", artifacts)
+            self.assertEqual(artifacts["ebook-chapters/objects/aa/epub-chapters/chapters/chapter-0001.xhtml"][1],
+                             str(chapter_root / "chapters/chapter-0001.xhtml"))
+            api = Mock()
+            api.file_exists.return_value = False
+            manifest, _operations = publish_reader_assets.build_publish(
+                api, "vomebook/Test", bundle, data_override=data,
+                artifact_roots={chapter_manifest: bundle},
+            )
+        self.assertEqual(manifest["files"][data["results"][0]["key"]]["chapter_manifest"],
+                         "ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json")
 
     def test_s3_reader_upload_uses_only_known_paths(self):
         fake_client = Mock()

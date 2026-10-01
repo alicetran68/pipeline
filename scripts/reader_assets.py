@@ -165,10 +165,13 @@ def validate_object_path(path: str) -> str:
 
 
 def validate_storage_path(path: str) -> str:
-    """Validate either a final immutable object or a lifecycle staging object."""
+    """Validate immutable Reader objects, chapter objects, or lifecycle staging."""
     if isinstance(path, str) and path.startswith("staging/"):
         if "\\" in path or path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
             raise ValueError("invalid reader staging path")
+        return path
+    if isinstance(path, str) and path.startswith("ebook-chapters/"):
+        validate_object_path(path[len("ebook-chapters/"):])
         return path
     return validate_object_path(path)
 
