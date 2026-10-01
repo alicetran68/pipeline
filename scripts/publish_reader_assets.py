@@ -155,14 +155,14 @@ def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
     return combined, roots
 
 
-def artifact_files(data: dict, roots: dict[str, Path]) -> dict[str, tuple[Path, str]]:
+def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = None) -> dict[str, tuple[Path, str]]:
     """Return bucket paths and local files for results from multiple bundles."""
     artifacts: dict[str, tuple[Path, str]] = {}
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
         path = result.get("path")
-        root = roots.get(path)
+        root = roots.get(path, bundle)
         if not isinstance(path, str) or root is None:
             continue
         artifact = root / path
@@ -642,7 +642,7 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                 api, repo_id, bundle, None, range_manifest,
                 data_override=data, artifact_roots=artifact_roots,
             )
-            artifacts = artifact_files(data, artifact_roots or {})
+            artifacts = artifact_files(data, artifact_roots or {}, bundle)
             if artifacts:
                 staging = set(staging_paths(data))
                 regular = {path: value for path, value in artifacts.items() if path not in staging}

@@ -2023,14 +2023,20 @@ class PublicationTests(unittest.TestCase):
             (bundle / "objects/aa/document.epub").write_bytes(b"epub!")
             chapter_root = bundle / "objects/aa/epub-chapters"
             (chapter_root / "chapters").mkdir(parents=True)
+            (chapter_root / "resources/chapter-0001").mkdir(parents=True)
             (chapter_root / "chapter-manifest.json").write_text("{}", encoding="utf-8")
             (chapter_root / "chapters/chapter-0001.xhtml").write_text("<html/>", encoding="utf-8")
+            (chapter_root / "resources/chapter-0001/cover.png").write_bytes(b"png")
             artifacts = publish_reader_assets.artifact_files(data, {
                 chapter_manifest: bundle, "objects/aa/document.epub": bundle,
             })
             self.assertIn("ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json", artifacts)
             self.assertEqual(artifacts["ebook-chapters/objects/aa/epub-chapters/chapters/chapter-0001.xhtml"][1],
                              str(chapter_root / "chapters/chapter-0001.xhtml"))
+            self.assertEqual(artifacts["ebook-chapters/objects/aa/epub-chapters/resources/chapter-0001/cover.png"][1],
+                             str(chapter_root / "resources/chapter-0001/cover.png"))
+            fallback_artifacts = publish_reader_assets.artifact_files(data, {}, bundle)
+            self.assertIn("ebook-chapters/objects/aa/epub-chapters/resources/chapter-0001/cover.png", fallback_artifacts)
             api = Mock()
             api.file_exists.return_value = False
             manifest, _operations = publish_reader_assets.build_publish(
