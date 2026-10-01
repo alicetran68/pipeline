@@ -1800,6 +1800,32 @@ aW1hZ2U=
             self.assertTrue(result["reused"])
             self.assertEqual(result["sha256"], hashlib.sha256(artifact).hexdigest())
 
+    def test_pdf_staging_rehomes_a_reused_dataset_artifact(self):
+        item = {
+            "key": "VoiceOfML/Test\0Moved.djvu", "extension": "djvu",
+            "source_url": "https://example.test/moved.djvu", "source_revision": "rev2",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+            "bucket_staging": True,
+        }
+        digest = "a" * 64
+        artifact = b"%PDF-reused"
+        reusable = {f"{digest}\0djvulibre-pdf-v1": {
+            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+            "bytes": len(artifact), "sha256": hashlib.sha256(artifact).hexdigest(),
+        }}
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"source")
+                return digest, 6
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "download_existing", side_effect=lambda _url, target, _digest: target.write_bytes(artifact)), \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
+                result = convert_reader_assets.convert_item(item, Path(root), reusable)
+
+        self.assertTrue(result["path"].startswith("staging/pdf/"))
+        self.assertTrue(result["reused"])
+
     def test_concurrent_remote_reuse_marks_both_results_reused(self):
         item = {
             "key": "VoiceOfML/Test\0One.djvu", "extension": "djvu",

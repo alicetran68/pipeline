@@ -1735,7 +1735,11 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             item["profile"], extension=item["extension"],
             source_revision=item["source_revision"], key=item["key"],
         )
-        object_path = existing["path"] if existing else (
+        reusable_path = existing.get("path") if existing else None
+        can_reuse_path = bool(reusable_path) and (
+            not item.get("bucket_staging") or reusable_path.startswith("staging/pdf/")
+        )
+        object_path = reusable_path if can_reuse_path else (
             f"staging/pdf/{digest[:2]}/{digest}/{profile_path}/{item['output_name']}"
             if item.get("bucket_staging") else
             f"objects/{digest[:2]}/{digest}/{profile_path}/{item['output_name']}"
