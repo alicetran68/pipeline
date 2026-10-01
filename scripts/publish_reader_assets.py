@@ -252,6 +252,7 @@ def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
 
 def s3_upload_tree(root: Path, bucket: str, prefix: str = "reader-index") -> None:
     """Upload a small generated tree by its local paths, without remote listing."""
+    root = Path(root)
     artifacts = {}
     local_root = root / prefix
     for path in sorted(local_root.rglob("*")):

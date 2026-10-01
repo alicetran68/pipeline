@@ -1923,6 +1923,18 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(kwargs["ExtraArgs"]["ContentType"],
                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
+    def test_s3_reader_index_upload_accepts_string_temp_directory(self):
+        fake_client = Mock()
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
+            "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
+            "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",
+        }), patch.object(publish_reader_assets, "_s3_client", return_value=fake_client):
+            index = Path(root) / "reader-index" / "manifest.json"
+            index.parent.mkdir()
+            index.write_text("{}", encoding="utf-8")
+            publish_reader_assets.s3_upload_tree(root, "vomebook/pdf-pages")
+        fake_client.upload_file.assert_called_once()
+
     def test_failed_retry_does_not_replace_existing_ready_asset(self):
         key = "VoiceOfML/Test\0A/Book.docx"
         existing = {"status": "ready", "source_revision": "old", "profile": "libreoffice-pdf-v2",
