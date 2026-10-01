@@ -24,9 +24,10 @@ def prepare(queue_path: Path = Path("output/reader-assets/queue.json")) -> tuple
     queue_path.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
 
     force_rebuild = os.environ.get("FORCE_REBUILD") == "true"
+    force_single_shard = force_rebuild and not bucket_migration
     scoped = bool(os.environ.get("INPUT_PATH") or os.environ.get("INPUT_REPO")
                   or os.environ.get("INPUT_EXTENSION"))
-    shard_count = 1 if force_rebuild or scoped else 20
+    shard_count = 1 if force_single_shard or scoped else 20
     for shard in range(shard_count):
         shard_items = [
             item for item in items
@@ -45,7 +46,8 @@ def prepare(queue_path: Path = Path("output/reader-assets/queue.json")) -> tuple
 
 def main() -> int:
     extension, count, stale_count, authoritative = prepare()
-    shard_count = 1 if (os.environ.get("FORCE_REBUILD") == "true"
+    bucket_migration = json.loads(Path("output/reader-assets/queue.json").read_text(encoding="utf-8")).get("bucket_migration") is True
+    shard_count = 1 if ((os.environ.get("FORCE_REBUILD") == "true" and not bucket_migration)
                         or os.environ.get("INPUT_PATH") or os.environ.get("INPUT_REPO")
                         or os.environ.get("INPUT_EXTENSION")) else 20
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

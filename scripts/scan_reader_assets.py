@@ -90,7 +90,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             and isinstance(chapter_path, str)
             and not chapter_path.startswith("ebook-chapters/")
         )
-        if (bucket_migrate and existing.get("status") == "ready"
+        if (bucket_migrate and not force and existing.get("status") == "ready"
                 and existing.get("bucket") == READER_ASSETS_BUCKET
                 and not chapter_bucket_path_missing_prefix):
             continue

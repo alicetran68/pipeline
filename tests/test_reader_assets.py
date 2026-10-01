@@ -1,7 +1,9 @@
 import concurrent.futures
+import base64
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import sys
 import tempfile
@@ -455,6 +457,7 @@ class ScannerTests(unittest.TestCase):
             {"Repo": "VoiceOfML/Test", "File": "Notes", "Extension": "md", "Folder": [], "Size": 10},
             {"Repo": "VoiceOfML/Test", "File": "Photo", "Extension": "jpg", "Folder": [], "Size": 10},
             {"Repo": "VoiceOfML/Test", "File": "Plain", "Extension": "txt", "Folder": [], "Size": 10},
+            {"Repo": "VoiceOfML/Test", "File": "Saved Page", "Extension": "mht", "Folder": [], "Size": 10},
         ]
         queue = scan_reader_assets.build_queue(
             records, self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
@@ -462,7 +465,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(
             [(item["extension"], item["reader_mode"], item["output_name"]) for item in queue],
             [("md", "markdown", "document.md"), ("jpg", "image", "document.webp"),
-             ("txt", "text", "document.txt")],
+             ("txt", "text", "document.txt"), ("mht", "html", "document.html")],
         )
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
@@ -473,6 +476,16 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scan_reader_assets.build_queue(
             self.records[:1], self.revisions, manifest, bucket_migrate=True,
         ), [])
+
+    def test_bucket_migration_force_requeues_an_asset_already_marked_in_bucket(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "docx-native-v2", "bucket": reader_assets.READER_ASSETS_BUCKET,
+        }}}
+        queue = scan_reader_assets.build_queue(
+            self.records[:1], self.revisions, manifest, bucket_migrate=True, force=True,
+        )
+        self.assertEqual([item["key"] for item in queue], [key])
 
     def test_bucket_migration_repairs_legacy_chapter_path_without_force_rebuild(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "epub",
@@ -1551,6 +1564,39 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "no readable content"):
                 convert_reader_assets.validate_html_content(html_file)
 
+    def test_epub_content_validation_rejects_missing_image_resources(self):
+        with tempfile.TemporaryDirectory() as root:
+            epub = Path(root) / "missing-image.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="O/content.opf"/></rootfiles></container>')
+                archive.writestr("O/content.opf", '<package><manifest><item id="chapter" href="chapter.xhtml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
+                archive.writestr("O/chapter.xhtml", '<html><body><p>Readable text in this chapter.</p><img src="images/missing.png"/></body></html>')
+            with self.assertRaisesRegex(RuntimeError, "image resource is missing"):
+                convert_reader_assets.validate_epub_content(epub)
+
+    def test_mhtml_content_validation_rejects_missing_or_invalid_images(self):
+        with tempfile.TemporaryDirectory() as root:
+            document = Path(root) / "document.html"
+            document.write_text('<html><body><p>Readable saved page.</p><img src="image.png"></body></html>', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "unembedded image"):
+                convert_reader_assets.validate_mhtml_content(document)
+
+            document.write_text('<html><body><p>Readable saved page.</p><img alt="missing source"></body></html>', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "without a source"):
+                convert_reader_assets.validate_mhtml_content(document)
+
+            document.write_text('<html><body><p>Readable saved page.</p><img src="data:image/png;base64,aW1hZ2U="></body></html>', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "invalid embedded image"):
+                convert_reader_assets.validate_mhtml_content(document)
+
+            from PIL import Image
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (2, 2), "white").save(image_bytes, format="PNG")
+            encoded = base64.b64encode(image_bytes.getvalue()).decode("ascii")
+            document.write_text(f'<html><body><p>Readable saved page.</p><img src="data:image/png;base64,{encoded}"></body></html>', encoding="utf-8")
+            convert_reader_assets.validate_mhtml_content(document)
+
     def test_docx_validation_requires_document_structure(self):
         import zipfile
 
@@ -1970,6 +2016,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_s3_reader_upload_uses_only_known_paths(self):
         fake_client = Mock()
+        fake_client.head_object.return_value = {"ContentLength": 5}
         with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
             "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
             "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",
@@ -1985,9 +2032,44 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(args[:3], (str(local), "pdf-pages", "objects/aa/document.docx"))
         self.assertEqual(kwargs["ExtraArgs"]["ContentType"],
                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        fake_client.head_object.assert_called_once_with(Bucket="pdf-pages", Key="objects/aa/document.docx")
+
+    def test_bucket_migration_uploads_reused_dataset_objects_before_marking_bucket(self):
+        key = "VoiceOfML/Test\0Saved.mht"
+        result = {
+            "key": key, "status": "ready", "source_revision": "rev1",
+            "source_sha256": "a" * 64, "source_bytes": 10, "source_extension": "mht",
+            "profile": "sanitized-mhtml-v6", "reader_mode": "html",
+            "path": "objects/aa/document.html", "bytes": len(b"<p>Saved</p>"),
+            "sha256": hashlib.sha256(b"<p>Saved</p>").hexdigest(),
+        }
+        existing = {"version": 1, "files": {key: {
+            "status": "ready", "source_revision": "rev1", "source_sha256": "a" * 64,
+            "source_extension": "mht", "profile": "sanitized-mhtml-v6", "reader_mode": "html",
+            "path": "objects/aa/document.html", "bytes": len(b"<p>Saved</p>"),
+            "sha256": hashlib.sha256(b"<p>Saved</p>").hexdigest(),
+        }}}
+        api = Mock()
+        api.file_exists.return_value = False
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root)
+            artifact = bundle / result["path"]
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"<p>Saved</p>")
+            data = {"version": 1, "bucket_migration": True, "results": [result]}
+            with patch.object(publish_reader_assets, "remote_manifest", return_value=existing):
+                manifest, operations = publish_reader_assets.build_publish(
+                    api, "vomebook/Reader-Assets", bundle, data_override=data,
+                )
+        entry = manifest["files"][key]
+        self.assertEqual(entry["bucket"], reader_assets.READER_ASSETS_BUCKET)
+        self.assertEqual({operation.path_in_repo for operation in operations}, {
+            "objects/aa/document.html", "manifest.json", "reader_assets.json.gz",
+        })
 
     def test_s3_reader_index_upload_accepts_string_temp_directory(self):
         fake_client = Mock()
+        fake_client.head_object.return_value = {"ContentLength": 2}
         with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
             "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
             "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",

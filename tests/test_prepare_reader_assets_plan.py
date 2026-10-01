@@ -51,6 +51,8 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
                     extension, count, _, authoritative = prepare_reader_assets_plan.prepare(output)
             self.assertEqual((extension, count, authoritative), ("static", 3, False))
             self.assertEqual(len(json.loads((root / "queue.json").read_text())["items"]), 3)
+            self.assertEqual(len(json.loads((root / "queue-0.json").read_text())["items"]), 3)
+            self.assertEqual(json.loads((root / "queue-19.json").read_text())["items"], [])
 
 
 if __name__ == "__main__":

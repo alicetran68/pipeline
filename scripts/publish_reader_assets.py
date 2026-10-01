@@ -244,12 +244,16 @@ def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
     def upload(item: tuple[str, tuple[Path, str]]) -> None:
         remote_path, (_root, local_path) = item
         content_type = mimetypes.guess_type(remote_path)[0] or "application/octet-stream"
+        expected_bytes = os.path.getsize(local_path)
         for attempt in range(max_attempts):
             try:
                 client.upload_file(
                     local_path, bucket_name, remote_path,
                     ExtraArgs={"ContentType": content_type},
                 )
+                uploaded = client.head_object(Bucket=bucket_name, Key=remote_path)
+                if uploaded.get("ContentLength") != expected_bytes:
+                    raise RuntimeError(f"uploaded Reader object size mismatch: {remote_path}")
                 return
             except Exception as error:
                 response = getattr(error, "response", {})
@@ -426,7 +430,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
         if result.get("status") == "ready":
             validate_storage_path(result.get("path"))
             remote = None
-            if not data.get("force_rebuild"):
+            if not data.get("force_rebuild") and not data.get("bucket_migration"):
                 identity = reusable_object_key(
                     result.get("source_sha256", ""), result.get("profile", ""),
                     extension=result.get("source_extension", ""),

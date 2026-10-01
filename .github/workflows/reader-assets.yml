@@ -226,7 +226,7 @@ jobs:
           BATCH_SIZE: ${{ inputs.limit || '20' }}
           CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ inputs.force == true && '1' || '20' }}
+          SHARD_COUNT: ${{ inputs.force == true && inputs.bucket_migrate != true && '1' || '20' }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
           SOURCE_PATH: ${{ inputs.path || '' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}

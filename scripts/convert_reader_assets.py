@@ -7,6 +7,7 @@ import base64
 import email.policy
 import hashlib
 import html
+import io
 import mimetypes
 import json
 import re
@@ -1329,10 +1330,18 @@ def validate_epub_content(path: Path) -> None:
             has_image = False
             for image in root.findall(".//{*}img"):
                 source = urllib.parse.unquote((image.attrib.get("src") or "").split("#", 1)[0])
-                image_path = posixpath.normpath(posixpath.join(posixpath.dirname(document_path), source))
-                if source and not image_path.startswith("../") and image_path in names:
+                if not source:
+                    raise RuntimeError("converted EPUB contains an image without a source")
+                if source.lower().startswith("data:image/"):
                     has_image = True
-                    break
+                    continue
+                parsed = urllib.parse.urlsplit(source)
+                if parsed.scheme or parsed.netloc:
+                    raise RuntimeError("converted EPUB contains an external image")
+                image_path = posixpath.normpath(posixpath.join(posixpath.dirname(document_path), parsed.path))
+                if image_path.startswith("../") or image_path not in names:
+                    raise RuntimeError("converted EPUB image resource is missing")
+                has_image = True
             meaningful.append(has_text or has_image)
         if not any(meaningful):
             raise RuntimeError("converted EPUB has no readable content")
@@ -1361,6 +1370,34 @@ def validate_html_content(path: Path) -> None:
         raise RuntimeError("converted HTML has no readable content")
 
 
+class _ImageSources(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.sources = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "img":
+            self.sources.append(dict(attrs).get("src", "").strip())
+
+
+def validate_mhtml_content(path: Path) -> None:
+    validate_html_content(path)
+    parser = _ImageSources()
+    parser.feed(path.read_text(encoding="utf-8", errors="replace"))
+    for source in parser.sources:
+        if not source:
+            raise RuntimeError("converted MHTML contains an image without a source")
+        match = re.fullmatch(r"data:image/(?:gif|jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})", source, re.IGNORECASE)
+        if not match:
+            raise RuntimeError("converted MHTML contains an unembedded image")
+        try:
+            payload = base64.b64decode(match.group(1), validate=True)
+            with Image.open(io.BytesIO(payload)) as image:
+                image.verify()
+        except Exception as exc:
+            raise RuntimeError("converted MHTML contains an invalid embedded image") from exc
+
+
 def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     mode = item["reader_mode"]
     if mode == "pdf":
@@ -1370,7 +1407,10 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     elif mode == "docx":
         validate_docx_content(path)
     elif mode == "html":
-        validate_html_content(path)
+        if item.get("extension") in {"mht", "mhtml"}:
+            validate_mhtml_content(path)
+        else:
+            validate_html_content(path)
     elif mode == "foliate" and path.stat().st_size == 0:
         raise RuntimeError("original Foliate asset is empty")
 
