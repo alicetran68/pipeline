@@ -97,6 +97,9 @@ jobs:
         id: scan
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
           READER_ASSETS_REPO: vomebook/Reader-Assets
           PER_SHARD_LIMIT: ${{ inputs.limit || '20' }}
           CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
@@ -210,6 +213,9 @@ jobs:
       - name: Convert assigned queue
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
           READER_ASSETS_REPO: vomebook/Reader-Assets
           READER_CONVERSION_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
           READER_EPUB_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '120' }}
@@ -302,6 +308,9 @@ jobs:
       - name: Publish shard ${{ matrix.shard }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           shopt -s nullglob
@@ -350,6 +359,9 @@ jobs:
         if: (needs.convert.result == 'success' || needs.convert.result == 'skipped') && (needs.publish.result == 'success' || needs.publish.result == 'skipped') && needs.plan.outputs.authoritative == 'true' && needs.plan.outputs.stale_count != '0'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_NAMESPACE: vomebook
           READER_ASSETS_REPO: vomebook/Reader-Assets
         run: |
           python scripts/convert_reader_assets.py --queue output/reader-assets/snapshot.json --bundle output/reader-assets/finalize

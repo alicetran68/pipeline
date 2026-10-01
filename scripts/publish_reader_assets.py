@@ -2,7 +2,9 @@
 """Atomically publish converted Reader Assets and their manifest."""
 
 import argparse
+import concurrent.futures
 import json
+import mimetypes
 import os
 import random
 import shutil
@@ -169,11 +171,94 @@ def artifact_files(data: dict, roots: dict[str, Path]) -> dict[str, tuple[Path, 
 def sync_artifacts(artifacts: dict[str, tuple[Path, str]], token: str, bucket: str,
                    max_attempts: int = 8) -> None:
     """Upload files grouped by their original bundle root."""
+    if s3_upload_enabled(bucket):
+        s3_upload_artifacts(artifacts, bucket, max_attempts)
+        return
     grouped: dict[Path, list[str]] = {}
     for remote_path, (root, _local_path) in artifacts.items():
         grouped.setdefault(root, []).append(remote_path)
     for root, paths in grouped.items():
         _sync_bucket_with_retry(str(root), token, sorted(paths), bucket, max_attempts)
+
+
+def s3_upload_enabled(bucket: str) -> bool:
+    """Use object-level S3 uploads when credentials are available."""
+    return bucket == READER_ASSETS_BUCKET and bool(
+        os.environ.get("HF_S3_ACCESS_KEY_ID") and os.environ.get("HF_S3_SECRET_ACCESS_KEY")
+    )
+
+
+def _s3_location(bucket: str) -> tuple[str, str]:
+    return bucket.rsplit("/", 1) if "/" in bucket else (
+        os.environ.get("HF_S3_NAMESPACE", "vomebook"), bucket
+    )
+
+
+def _s3_client(bucket: str):
+    import boto3
+    from botocore.config import Config
+
+    namespace, _bucket_name = _s3_location(bucket)
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://s3.hf.co/{namespace}",
+        aws_access_key_id=os.environ["HF_S3_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["HF_S3_SECRET_ACCESS_KEY"],
+        config=Config(
+            region_name="us-east-1",
+            s3={"addressing_style": "path"},
+            retries={"mode": "adaptive", "max_attempts": 8},
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
+    )
+
+
+def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
+                        max_attempts: int = 8) -> None:
+    """Upload exactly the known artifact paths without listing the bucket."""
+    _namespace, bucket_name = _s3_location(bucket)
+    client = _s3_client(bucket)
+    try:
+        workers = max(1, int(os.environ.get("HF_S3_UPLOAD_WORKERS", "8")))
+    except ValueError as error:
+        raise RuntimeError("HF_S3_UPLOAD_WORKERS must be a positive integer") from error
+
+    def upload(item: tuple[str, tuple[Path, str]]) -> None:
+        remote_path, (_root, local_path) = item
+        content_type = mimetypes.guess_type(remote_path)[0] or "application/octet-stream"
+        for attempt in range(max_attempts):
+            try:
+                client.upload_file(
+                    local_path, bucket_name, remote_path,
+                    ExtraArgs={"ContentType": content_type},
+                )
+                return
+            except Exception as error:
+                response = getattr(error, "response", {})
+                status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                code = response.get("Error", {}).get("Code")
+                retryable = status in {408, 429, 500, 502, 503, 504} or code in {"SlowDown", "RequestTimeout"}
+                if not retryable or attempt + 1 == max_attempts:
+                    raise
+                delay = shared.hf_retry_delay(attempt, cap=120) + random.uniform(0, 2)
+                print(f"transient S3 Reader upload error ({code or status}); retrying in {delay:.1f}s")
+                time.sleep(delay)
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(workers, max(1, len(artifacts)))) as executor:
+        list(executor.map(upload, sorted(artifacts.items())))
+
+
+def s3_upload_tree(root: Path, bucket: str, prefix: str = "reader-index") -> None:
+    """Upload a small generated tree by its local paths, without remote listing."""
+    artifacts = {}
+    local_root = root / prefix
+    for path in sorted(local_root.rglob("*")):
+        if path.is_file():
+            artifacts[path.relative_to(root).as_posix()] = (root, str(path))
+    if artifacts:
+        s3_upload_artifacts(artifacts, bucket)
 
 
 def materialize_bundles(bundles: list[Path], data: dict, output: Path) -> Path:
@@ -570,8 +655,11 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                 (index_root / INDEX_FILES["lifecycle"].rsplit("/", 1)[-1]).write_text(
                     json.dumps(lifecycle, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                     encoding="utf-8")
-                sync_bucket(root, f"hf://buckets/{READER_ASSETS_BUCKET}",
-                            include=["reader-index/**"], token=token, quiet=False)
+                if s3_upload_enabled(READER_ASSETS_BUCKET):
+                    s3_upload_tree(root, READER_ASSETS_BUCKET)
+                else:
+                    sync_bucket(root, f"hf://buckets/{READER_ASSETS_BUCKET}",
+                                include=["reader-index/**"], token=token, quiet=False)
             return manifest, len(result_keys)
         except HfHubHTTPError as exc:
             status = shared.hf_status_code(exc)
