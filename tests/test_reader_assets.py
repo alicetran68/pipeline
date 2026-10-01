@@ -2634,6 +2634,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
+        staging_section = workflow.split("      bucket_pdf_staging:\n", 1)[1].split("      dry_run:\n", 1)[0]
+        self.assertIn("default: false", staging_section)
+        self.assertIn("pdf-optimized", staging_section)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
         self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)

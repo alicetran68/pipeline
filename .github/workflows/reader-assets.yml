@@ -44,9 +44,9 @@ on:
         default: true
         type: boolean
       bucket_pdf_staging:
-        description: Also convert PDF-producing formats into bucket staging PDFs; leave disabled while PDF render/OCR is paused
+        description: Explicitly stage PDF-producing formats in pdf-optimized for the paused PDF Range evaluation; enable only when that pipeline is active
         required: false
-        default: true
+        default: false
         type: boolean
       dry_run:
         description: Scan only; do not download, convert, or publish
