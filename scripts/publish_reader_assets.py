@@ -183,7 +183,7 @@ def sync_artifacts(artifacts: dict[str, tuple[Path, str]], token: str, bucket: s
 
 def s3_upload_enabled(bucket: str) -> bool:
     """Use object-level S3 uploads when credentials are available."""
-    return bucket == READER_ASSETS_BUCKET and bool(
+    return bucket in {READER_ASSETS_BUCKET, READER_STAGING_BUCKET} and bool(
         os.environ.get("HF_S3_ACCESS_KEY_ID") and os.environ.get("HF_S3_SECRET_ACCESS_KEY")
     )
 
