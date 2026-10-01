@@ -86,6 +86,8 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
+        if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
+            continue
         if (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
                 and isinstance(result.get("path"), str)):
             paths.add(result["path"])
@@ -122,7 +124,9 @@ def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
     force_values = {bool(item.get("force_rebuild")) for item in data}
     authoritative_values = {bool(item.get("authoritative_snapshot")) for item in data}
     migration_values = {bool(item.get("bucket_migration")) for item in data}
-    if len(force_values) > 1 or len(authoritative_values) > 1 or len(migration_values) > 1:
+    pdf_dataset_values = {bool(item.get("pdf_to_dataset")) for item in data}
+    if (len(force_values) > 1 or len(authoritative_values) > 1
+            or len(migration_values) > 1 or len(pdf_dataset_values) > 1):
         raise ValueError("reader asset bundles have incompatible publication modes")
     results = []
     roots: dict[str, Path] = {}
@@ -150,6 +154,7 @@ def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
         "force_rebuild": force_values.pop(),
         "authoritative_snapshot": authoritative_values.pop(),
         "bucket_migration": migration_values.pop(),
+        "pdf_to_dataset": pdf_dataset_values.pop(),
         "active_keys": active_keys,
     }
     return combined, roots
@@ -160,6 +165,8 @@ def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = Non
     artifacts: dict[str, tuple[Path, str]] = {}
     for result in data.get("results", []):
         if result.get("status") != "ready":
+            continue
+        if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
             continue
         path = result.get("path")
         root = roots.get(path, bundle)
@@ -464,7 +471,8 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                             artifacts[path] = str(child)
             if result.get("reader_mode") in BUCKET_READER_MODES:
                 entry["bucket"] = READER_ASSETS_BUCKET
-            if result.get("reader_mode") in BUCKET_STAGING_MODES:
+            if (result.get("reader_mode") in BUCKET_STAGING_MODES
+                    and data.get("pdf_to_dataset") is not True):
                 entry["bucket"] = READER_STAGING_BUCKET
                 entry["bucket_staging"] = True
             if result.get("chapter_manifest"):
@@ -625,6 +633,42 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
     raise RuntimeError("reader asset publication retry limit reached")
 
 
+def publish_dataset_pdf_artifacts(api: HfApi, repo_id: str, data: dict,
+                                  bundle: Path, artifact_roots: dict[str, Path] | None = None,
+                                  max_attempts: int = 20) -> None:
+    """Publish generated PDFs to the Dataset while indexing them in the bucket."""
+    if not data.get("pdf_to_dataset"):
+        return
+    artifact_roots = artifact_roots or {}
+    artifacts = {}
+    for result in data.get("results", []):
+        if result.get("status") != "ready" or result.get("reader_mode") != "pdf":
+            continue
+        path = result.get("path")
+        root = artifact_roots.get(path, bundle)
+        if not isinstance(path, str) or not (root / path).is_file():
+            raise ValueError(f"missing Dataset PDF artifact for {result.get('key')}")
+        artifacts[path] = root / path
+    if not artifacts:
+        return
+    for attempt in range(max_attempts):
+        info = api.repo_info(repo_id=repo_id, repo_type="dataset")
+        operations = [CommitOperationAdd(path_in_repo=path, path_or_fileobj=str(local))
+                      for path, local in sorted(artifacts.items())]
+        try:
+            api.create_commit(
+                repo_id=repo_id, repo_type="dataset", operations=operations,
+                commit_message="Publish Reader PDF assets", parent_commit=info.sha,
+            )
+            return
+        except HfHubHTTPError as exc:
+            status = shared.hf_status_code(exc)
+            if status not in {409, 412, 429, 500, 502, 503, 504} or attempt + 1 == max_attempts:
+                raise
+            time.sleep(shared.hf_retry_delay(attempt) + random.uniform(0, 2))
+    raise RuntimeError("Dataset PDF publication retry limit reached")
+
+
 def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                           result_keys: set[str], max_attempts: int,
                           artifact_roots: dict[str, Path] | None = None) -> tuple[dict, int]:
@@ -642,6 +686,7 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                 api, repo_id, bundle, None, range_manifest,
                 data_override=data, artifact_roots=artifact_roots,
             )
+            publish_dataset_pdf_artifacts(api, repo_id, data, bundle, artifact_roots, max_attempts)
             artifacts = artifact_files(data, artifact_roots or {}, bundle)
             if artifacts:
                 staging = set(staging_paths(data))
@@ -659,6 +704,8 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             updates = []
             for result in data.get("results", []):
                 if result.get("status") != "ready":
+                    continue
+                if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
                     continue
                 if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
                         or result.get("chapter_manifest")):

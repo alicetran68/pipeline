@@ -464,9 +464,21 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual(
             [(item["extension"], item["reader_mode"], item["output_name"]) for item in queue],
-            [("md", "markdown", "document.md"), ("jpg", "image", "document.webp"),
-             ("txt", "text", "document.txt"), ("mht", "html", "document.html")],
+             [("md", "markdown", "document.md"), ("jpg", "image", "document.webp"),
+              ("txt", "text", "document.txt"), ("mht", "html", "document.html")],
         )
+
+    def test_bucket_migration_queues_pdf_to_dataset_when_staging_is_disabled(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Table", "Extension": "xlsx",
+                  "Folder": [], "Size": 100}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, reader_assets.empty_manifest(),
+            bucket_migrate=True, bucket_pdf_staging=False,
+        )
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["reader_mode"], "pdf")
+        self.assertTrue(queue[0]["pdf_to_dataset"])
+        self.assertNotIn("bucket_staging", queue[0])
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
@@ -2045,6 +2057,26 @@ class PublicationTests(unittest.TestCase):
             )
         self.assertEqual(manifest["files"][data["results"][0]["key"]]["chapter_manifest"],
                          "ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json")
+
+    def test_pdf_to_dataset_upload_commits_the_pdf_to_reader_assets(self):
+        result = {
+            "key": "VoiceOfML/Test\0table.xlsx", "status": "ready",
+            "reader_mode": "pdf", "path": "objects/aa/document.pdf",
+        }
+        api = Mock()
+        api.repo_info.return_value.sha = "parent"
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root)
+            artifact = bundle / result["path"]
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"%PDF-table")
+            publish_reader_assets.publish_dataset_pdf_artifacts(
+                api, "vomebook/Reader-Assets",
+                {"pdf_to_dataset": True, "results": [result]}, bundle,
+            )
+        api.create_commit.assert_called_once()
+        operations = api.create_commit.call_args.kwargs["operations"]
+        self.assertEqual([operation.path_in_repo for operation in operations], [result["path"]])
 
     def test_s3_reader_upload_uses_only_known_paths(self):
         fake_client = Mock()

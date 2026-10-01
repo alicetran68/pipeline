@@ -72,8 +72,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                     source_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0)))
         if contract is None:
             continue
-        if bucket_migrate and contract[1] == "pdf" and not bucket_pdf_staging:
-            continue
+        pdf_to_dataset = bucket_migrate and contract[1] == "pdf" and not bucket_pdf_staging
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
@@ -115,6 +114,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             )
             if not retryable_update and not missing_chapters:
                 continue
+        if (pdf_to_dataset and not force and existing.get("status") == "ready"
+                and existing.get("profile") == profile
+                and existing.get("bucket") in {None, ""}):
+            continue
         if not bucket_migrate and not force and existing.get("status") == "failed" and existing.get("profile") == profile and not retry_failed:
             continue
         failed_current = (existing.get("failed_source_revision") == revision
@@ -129,7 +132,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "conversion_dependencies": conversion_dependencies(ext, reader_mode),
         }
         if bucket_migrate and reader_mode == "pdf":
-            item["bucket_staging"] = True
+            if bucket_pdf_staging:
+                item["bucket_staging"] = True
+            else:
+                item["pdf_to_dataset"] = True
         selected.append(item)
     priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                   "doc": 3, "docx": 3, "htm": 3, "html": 3, "txt": 3, "md": 3, "markdown": 3,
@@ -230,6 +236,7 @@ def main() -> int:
         "force_rebuild": bool(args.force),
         "authoritative_snapshot": not bool(args.repo or args.extension or args.path or args.bucket_migrate),
         "bucket_migration": bool(args.bucket_migrate),
+        "pdf_to_dataset": bool(args.bucket_migrate and not args.bucket_pdf_staging),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
     return 0

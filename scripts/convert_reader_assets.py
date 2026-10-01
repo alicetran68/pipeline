@@ -1875,6 +1875,8 @@ def main() -> int:
         "version": 1,
         "results": results,
         "force_rebuild": bool(queue_data.get("force_rebuild")),
+        "bucket_migration": bool(queue_data.get("bucket_migration")),
+        "pdf_to_dataset": bool(queue_data.get("pdf_to_dataset")),
     }
     if queue_data.get("authoritative_snapshot") is True:
         bundle_data["active_keys"] = queue_data.get("active_keys", [])
