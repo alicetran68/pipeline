@@ -477,7 +477,7 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["reader_mode"], "pdf")
-        self.assertTrue(queue[0]["pdf_to_dataset"])
+        self.assertTrue(queue[0]["page_stream"])
         self.assertNotIn("bucket_staging", queue[0])
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
@@ -2061,7 +2061,7 @@ class PublicationTests(unittest.TestCase):
     def test_pdf_to_dataset_upload_commits_the_pdf_to_reader_assets(self):
         result = {
             "key": "VoiceOfML/Test\0table.xlsx", "status": "ready",
-            "reader_mode": "pdf", "path": "objects/aa/document.pdf",
+            "reader_mode": "pdf", "pdf_to_dataset": True, "path": "objects/aa/document.pdf",
         }
         api = Mock()
         api.repo_info.return_value.sha = "parent"

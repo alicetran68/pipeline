@@ -86,11 +86,16 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
-        if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
+        if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
             continue
         if (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
                 and isinstance(result.get("path"), str)):
             paths.add(result["path"])
+            if result.get("page_stream") and bundle is not None:
+                root = (bundle / Path(result["path"]).parent / "pages")
+                if root.is_dir():
+                    paths.update((Path(result["path"]).parent / "pages" / item.name).as_posix()
+                                 for item in root.iterdir() if item.is_file())
         if result.get("chapter_manifest"):
             if bundle is not None:
                 local_manifest = local_chapter_path(result["chapter_manifest"])
@@ -166,7 +171,7 @@ def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = Non
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
-        if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
+        if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
             continue
         path = result.get("path")
         root = roots.get(path, bundle)
@@ -175,6 +180,13 @@ def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = Non
         artifact = root / path
         if artifact.is_file():
             artifacts[path] = (root, str(artifact))
+        if result.get("page_stream"):
+            page_root = root / Path(path).parent / "pages"
+            if not page_root.is_dir():
+                raise ValueError(f"missing spreadsheet page stream for {result['key']}")
+            for child in sorted(page_root.glob("*.webp")):
+                remote = (Path(path).parent / "pages" / child.name).as_posix()
+                artifacts[remote] = (root, str(child))
         if result.get("chapter_manifest"):
             chapter_path = result["chapter_manifest"]
             local_manifest = local_chapter_path(chapter_path)
@@ -472,9 +484,11 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
             if result.get("reader_mode") in BUCKET_READER_MODES:
                 entry["bucket"] = READER_ASSETS_BUCKET
             if (result.get("reader_mode") in BUCKET_STAGING_MODES
-                    and data.get("pdf_to_dataset") is not True):
+                    and result.get("pdf_to_dataset") is not True):
                 entry["bucket"] = READER_STAGING_BUCKET
                 entry["bucket_staging"] = True
+            if result.get("page_stream"):
+                entry["bucket"] = READER_ASSETS_BUCKET
             if result.get("chapter_manifest"):
                 if data.get("bucket_migration"):
                     entry["chapter_manifest"] = bucket_chapter_path(result["chapter_manifest"])
@@ -637,12 +651,13 @@ def publish_dataset_pdf_artifacts(api: HfApi, repo_id: str, data: dict,
                                   bundle: Path, artifact_roots: dict[str, Path] | None = None,
                                   max_attempts: int = 20) -> None:
     """Publish generated PDFs to the Dataset while indexing them in the bucket."""
-    if not data.get("pdf_to_dataset"):
+    if not any(result.get("pdf_to_dataset") for result in data.get("results", [])):
         return
     artifact_roots = artifact_roots or {}
     artifacts = {}
     for result in data.get("results", []):
-        if result.get("status") != "ready" or result.get("reader_mode") != "pdf":
+        if (result.get("status") != "ready" or result.get("reader_mode") != "pdf"
+                or result.get("pdf_to_dataset") is not True):
             continue
         path = result.get("path")
         root = artifact_roots.get(path, bundle)
@@ -705,7 +720,7 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             for result in data.get("results", []):
                 if result.get("status") != "ready":
                     continue
-                if result.get("reader_mode") == "pdf" and data.get("pdf_to_dataset") is True:
+                if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
                     continue
                 if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
                         or result.get("chapter_manifest")):

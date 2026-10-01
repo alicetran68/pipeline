@@ -20,6 +20,7 @@ MANIFEST_NAME = "manifest.json"
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v8-bucket"
+SPREADSHEET_PAGE_PROFILE = "libreoffice-image-pages-xlsx-v1"
 BUCKET_NATIVE_EXTENSIONS = {
     "txt": ("native-text-v1", "text", "document.txt"),
     "md": ("native-markdown-v1", "markdown", "document.md"),
@@ -251,6 +252,8 @@ def bucket_conversion_contract(repo: str, path: str, extension: str, source_byte
         return ("pdf-staging-v1", "pdf", "document.pdf")
     if extension in BUCKET_NATIVE_EXTENSIONS:
         return BUCKET_NATIVE_EXTENSIONS[extension]
+    if extension in {"xls", "xlsx"}:
+        return (SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json")
     contract = source_conversion_contract(repo, path, extension, source_bytes)
     if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub"}:
         return contract

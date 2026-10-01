@@ -11,14 +11,18 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 try:
     from .reader_assets import (
-        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO, asset_key, bucket_conversion_contract, canonical_json, conversion_dependencies, decode_search_payload,
+        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
+        SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
+        conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
     )
     from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
 except ImportError:
     from reader_assets import (
-        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO, asset_key, bucket_conversion_contract, canonical_json, conversion_dependencies, decode_search_payload,
+        EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
+        SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
+        conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
     )
@@ -72,7 +76,9 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                     source_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0)))
         if contract is None:
             continue
-        pdf_to_dataset = bucket_migrate and contract[1] == "pdf" and not bucket_pdf_staging
+        spreadsheet_pages = contract[0] == SPREADSHEET_PAGE_PROFILE
+        pdf_to_dataset = (bucket_migrate and contract[1] == "pdf"
+                          and not bucket_pdf_staging and not spreadsheet_pages)
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
@@ -132,7 +138,9 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "conversion_dependencies": conversion_dependencies(ext, reader_mode),
         }
         if bucket_migrate and reader_mode == "pdf":
-            if bucket_pdf_staging:
+            if spreadsheet_pages:
+                item["page_stream"] = True
+            elif bucket_pdf_staging:
                 item["bucket_staging"] = True
             else:
                 item["pdf_to_dataset"] = True

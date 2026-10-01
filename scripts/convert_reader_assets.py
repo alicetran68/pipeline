@@ -1370,6 +1370,68 @@ def validate_html_content(path: Path) -> None:
         raise RuntimeError("converted HTML has no readable content")
 
 
+def validate_page_manifest(path: Path) -> None:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("converted page manifest is invalid") from exc
+    pages = manifest.get("pages") if isinstance(manifest, dict) else None
+    if (manifest.get("version") != 2 or manifest.get("kind") != "pdf-pages"
+            or not isinstance(pages, list) or not pages):
+        raise RuntimeError("converted page manifest is invalid")
+    for number, page in enumerate(pages, 1):
+        if (not isinstance(page, dict) or page.get("page") != number
+                or not isinstance(page.get("path"), str)
+                or not page["path"].endswith(f"/pages/page-{number:06d}.webp")
+                or not isinstance(page.get("bytes"), int) or page["bytes"] <= 0
+                or not re.fullmatch(r"[0-9a-f]{64}", str(page.get("sha256", "")))):
+            raise RuntimeError("converted page manifest is invalid")
+
+
+def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: dict,
+                                 source_sha256: str, object_path: str) -> None:
+    output = work / "spreadsheet-pdf"
+    output.mkdir()
+    pdf = output / "document.pdf"
+    office_profile = (work / "libreoffice-profile").resolve().as_uri()
+    run_checked([
+        "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
+        "--convert-to", "pdf", "--outdir", str(output), str(source),
+    ])
+    produced = output / f"{source.stem}.pdf"
+    if not produced.is_file():
+        raise RuntimeError("LibreOffice produced no spreadsheet PDF")
+    if produced != pdf:
+        produced.rename(pdf)
+    validate_office_pdf(pdf, item, work, source)
+    rendered = work / "spreadsheet-pages"
+    rendered.mkdir()
+    run_checked(["pdftoppm", "-png", "-r", "150", str(pdf), str(rendered / "page")])
+    images = sorted(rendered.glob("page-*.png"), key=lambda value: int(value.stem.rsplit("-", 1)[-1]))
+    if not images:
+        raise RuntimeError("spreadsheet PDF produced no pages")
+    page_root = target.parent / "pages"
+    page_root.mkdir(parents=True, exist_ok=True)
+    pages = []
+    for number, image_path in enumerate(images, 1):
+        destination = page_root / f"page-{number:06d}.webp"
+        with Image.open(image_path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+            image.save(destination, "WEBP", method=6, quality=85)
+        data = destination.read_bytes()
+        pages.append({
+            "page": number,
+            "path": f"{posixpath.dirname(object_path)}/pages/page-{number:06d}.webp",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        })
+    target.write_bytes(canonical_json({
+        "version": 2, "kind": "pdf-pages", "source_sha256": source_sha256,
+        "profile": item["profile"], "page_count": len(pages), "pages": pages,
+    }, pretty=True))
+
+
 class _ImageSources(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -1401,7 +1463,10 @@ def validate_mhtml_content(path: Path) -> None:
 def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     mode = item["reader_mode"]
     if mode == "pdf":
-        validate_pdf_content(path, work)
+        if item.get("output_name") == "page-manifest.json":
+            validate_page_manifest(path)
+        else:
+            validate_pdf_content(path, work)
     elif mode == "epub":
         validate_epub_content(path)
     elif mode == "docx":
@@ -1415,7 +1480,8 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
         raise RuntimeError("original Foliate asset is empty")
 
 
-def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
+def convert_file(item: dict, source: Path, target: Path, work: Path,
+                 source_sha256: str = "", object_path: str = "") -> None:
     ext = item["extension"]
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     explicit_password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
@@ -1553,6 +1619,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path) -> None:
                     raise
                 time.sleep(2)
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
+        if item.get("output_name") == "page-manifest.json":
+            convert_spreadsheet_to_pages(source, target, work, item, source_sha256, object_path)
+            return
         out = work / "office-pdf"
         out.mkdir()
         office_source = source
@@ -1755,24 +1824,46 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     download_existing(asset_url, target, existing["sha256"])
                     if target.stat().st_size != existing["bytes"]:
                         raise RuntimeError("reusable reader artifact size mismatch")
-                    validate_output(target, item["reader_mode"])
+                    if item.get("output_name") == "page-manifest.json":
+                        validate_page_manifest(target)
+                    else:
+                        validate_output(target, item["reader_mode"])
                     validate_reader_content(target, item, work)
                 else:
                     temporary = work / item["output_name"]
-                    convert_file(item, source, temporary, work)
+                    if item.get("output_name") == "page-manifest.json":
+                        convert_file(item, source, temporary, work, digest, object_path)
+                    else:
+                        convert_file(item, source, temporary, work)
                     if item["reader_mode"] == "epub" and item["extension"] != "chm":
                         sanitize_chm_epub(temporary, work)
-                    validate_output(temporary, item["reader_mode"])
+                    if item.get("output_name") == "page-manifest.json":
+                        validate_page_manifest(temporary)
+                    else:
+                        validate_output(temporary, item["reader_mode"])
                     if item["extension"] in {"odt", "rtf", "chm"}:
                         validate_html_content(temporary)
                     if item["extension"] == "djvu":
                         validate_djvu_pdf(temporary, work)
-                    if item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"} and item["reader_mode"] == "pdf":
+                    if (item["extension"] in {"doc", "docx", "htm", "html", "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}
+                            and item["reader_mode"] == "pdf"
+                            and item.get("output_name") != "page-manifest.json"):
                         validate_office_pdf(temporary, item, work, source)
                     validate_reader_content(temporary, item, work)
+                    if item.get("output_name") == "page-manifest.json":
+                        staged_pages = temporary.parent / "pages"
+                        final_pages = target.parent / "pages"
+                        if not staged_pages.is_dir():
+                            raise RuntimeError("spreadsheet page stream is missing")
+                        if final_pages.exists():
+                            shutil.rmtree(final_pages)
+                        shutil.move(staged_pages, final_pages)
                     shutil.move(temporary, target)
             else:
-                validate_output(target, item["reader_mode"])
+                if item.get("output_name") == "page-manifest.json":
+                    validate_page_manifest(target)
+                else:
+                    validate_output(target, item["reader_mode"])
                 if item["extension"] == "chm" and item["reader_mode"] == "epub":
                     validate_chm_epub(target)
                 elif item["extension"] == "chm":
@@ -1825,10 +1916,14 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             "source_sha256": digest, "source_bytes": source_bytes,
             "source_extension": item["extension"], "profile": item["profile"],
             "reader_mode": item["reader_mode"], "path": object_path, "bytes": target.stat().st_size,
-            "sha256": file_sha256(target), "reused": reused,
+        "sha256": file_sha256(target), "reused": reused,
         }
+        if item.get("pdf_to_dataset"):
+            result["pdf_to_dataset"] = True
         if item["extension"] == "epub" and item["reader_mode"] == "pdf":
             result["fallback_path"] = object_path
+        if item.get("output_name") == "page-manifest.json":
+            result["page_stream"] = True
         if chapter_manifest_path:
             result["chapter_manifest"] = chapter_manifest_path
             result["chapter_bundle_profile"] = EPUB_CHAPTER_PROFILE
