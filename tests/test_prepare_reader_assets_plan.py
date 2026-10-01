@@ -54,6 +54,24 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
             self.assertEqual(len(json.loads((root / "queue-0.json").read_text())["items"]), 3)
             self.assertEqual(json.loads((root / "queue-19.json").read_text())["items"], [])
 
+    def test_bucket_migration_keeps_twenty_shards_for_scoped_extension(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "queue.json"
+            output.write_text(json.dumps({
+                "items": [{"extension": "chm", "key": str(index)} for index in range(40)],
+                "bucket_migration": True,
+                "stale_keys": [],
+                "authoritative_snapshot": False,
+            }))
+            with patch.object(prepare_reader_assets_plan, "scan_reader_assets") as scanner:
+                scanner.shard_for_key.side_effect = lambda key, count: int(key) % count
+                with patch.dict(os.environ, {"FORCE_REBUILD": "true", "INPUT_EXTENSION": "chm",
+                                              "INPUT_PATH": "", "INPUT_REPO": ""}, clear=False):
+                    prepare_reader_assets_plan.prepare(output)
+            self.assertEqual(len(json.loads((root / "queue-0.json").read_text())["items"]), 2)
+            self.assertEqual(len(json.loads((root / "queue-19.json").read_text())["items"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
