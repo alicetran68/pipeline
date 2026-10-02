@@ -960,6 +960,7 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
         sanitize_chm_epub(target, work)
         if target.exists():
             repair_conversion(source, target, work)
+            repair_chm_epub_images(source, target, work)
         validate_output(target, "epub")
         validate_chm_epub(target)
         return

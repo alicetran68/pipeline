@@ -1094,6 +1094,25 @@ aW1hZ2U=
                 convert_reader_assets.convert_file({"extension": "chm"}, source, target, work)
             conversion.assert_called_once_with(source, target, work)
 
+    def test_chm_conversion_repairs_images_before_validation(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.chm", work / "document.epub"
+            source.write_bytes(b"ITSF")
+
+            def convert(_command, **_kwargs):
+                target.write_bytes(b"converted")
+
+            with patch.object(convert_reader_assets, "run_checked", side_effect=convert), \
+                    patch.object(convert_reader_assets, "sanitize_chm_epub"), \
+                    patch("scripts.chm_navigation.repair_conversion"), \
+                    patch.object(convert_reader_assets, "repair_chm_epub_images") as repair_images, \
+                    patch.object(convert_reader_assets, "validate_output"), \
+                    patch.object(convert_reader_assets, "validate_chm_epub"):
+                convert_reader_assets.convert_chm(source, target, work)
+
+            repair_images.assert_called_once_with(source, target, work)
+
     def test_caj_family_detection_uses_content_not_extension(self):
         cases = {
             b"%PDF-1.7": "pdf", b"KDH 2.00": "kdh", b"CAJ\0": "caj",
