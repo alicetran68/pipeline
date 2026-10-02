@@ -1612,18 +1612,22 @@ aW1hZ2U=
                 archive.writestr("xl/media/image1.png", b"image")
 
             def export_html(command, **_kwargs):
-                html_output = Path(command[command.index("--outdir") + 1])
+                html_output = Path(command[-1])
                 html_output.mkdir(parents=True, exist_ok=True)
                 (html_output / "sample.html").write_text(
                     '<a>Summary</a><a>Details</a><a href="sample_html_1.html">Summary</a>',
                     encoding="utf-8",
                 )
-                (html_output / "sample_html_1.html").write_text(
+                first_page = html_output / "sheet-0001" / "sheet.html"
+                first_page.parent.mkdir()
+                first_page.write_text(
                     '<h1>Summary</h1><table><tr><td>Year</td><td>Value</td></tr>'
                     '<tr><td>2024</td><td>10</td></tr></table><img src="chart.png"><img src="embedded.png">',
                     encoding="utf-8",
                 )
-                (html_output / "sample_html_2.html").write_text(
+                second_page = html_output / "sheet-0002" / "sheet.html"
+                second_page.parent.mkdir()
+                second_page.write_text(
                     '<h1>Details</h1><table><tr><td>完整表格</td><td>数据</td></tr></table>',
                     encoding="utf-8",
                 )
@@ -1643,8 +1647,8 @@ aW1hZ2U=
                 )
 
             command = run.call_args.args[0]
-            self.assertIn("html:XHTML Calc File:UTF8", command)
-            self.assertNotIn("pdf", command[command.index("--convert-to") + 1].lower())
+            self.assertTrue(command[1].endswith("render_spreadsheet_html.py"))
+            self.assertNotIn("pdf", " ".join(command).lower())
             validate_pdf.assert_not_called()
             manifest = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(manifest["page_count"], 1)

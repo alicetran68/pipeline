@@ -87,6 +87,9 @@ CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 OLE_SIGNATURE = bytes.fromhex("d0cf11e0a1b11ae1")
 MIN_PAGE_CONTENT_RATIO = 0.0005
 COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT", "120"))
+SPREADSHEET_RENDER_COMMAND_TIMEOUT_SECONDS = max(
+    1800, int(os.environ.get("READER_SPREADSHEET_RENDER_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS)))
+)
 EPUB_COMMAND_TIMEOUT_SECONDS = max(1800, int(os.environ.get(
     "READER_EPUB_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
 )))
@@ -1385,27 +1388,23 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
                                  source_sha256: str, object_path: str) -> None:
     output = work / "spreadsheet-html"
     output.mkdir()
-    office_profile = (work / "libreoffice-profile").resolve().as_uri()
+    helper = Path(__file__).with_name("render_spreadsheet_html.py")
     run_checked([
-        "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-        "--convert-to", "html:XHTML Calc File:UTF8", "--outdir", str(output), str(source),
-    ])
-    main_html = output / f"{source.stem}.html"
-    if not main_html.is_file():
-        raise RuntimeError("LibreOffice produced no spreadsheet HTML")
-    exported_files = sorted(output.glob("*.html"))
-    if not exported_files:
-        raise RuntimeError("spreadsheet HTML export contains no worksheet pages")
-    html_pages = [path for path in exported_files if path != main_html] or [main_html]
+        "/usr/bin/python3", str(helper), str(source), str(output),
+    ], timeout_seconds=SPREADSHEET_RENDER_COMMAND_TIMEOUT_SECONDS)
+    html_pages = sorted(output.glob("sheet-*/sheet.html"))
+    if not html_pages:
+        raise RuntimeError("LibreOffice produced no spreadsheet worksheet HTML")
 
     expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(source)
 
-    exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in exported_files)
     if len(html_pages) < len(expected_sheets):
         raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
-    visible_html = html.unescape(exported_html)
+    exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in html_pages)
+    visible_html = re.sub(r"\s+", " ", extract_html_text(exported_html))
     missing_values = [value for value in expected_values
-                      if not any(candidate in visible_html for candidate in spreadsheet_text_variants(value))]
+                      if not any(re.sub(r"\s+", " ", candidate).strip() in visible_html
+                                 for candidate in spreadsheet_text_variants(value))]
     if missing_values:
         raise RuntimeError(f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s)")
     exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
@@ -1542,6 +1541,25 @@ class _ImageSources(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "img":
             self.sources.append(dict(attrs).get("src", "").strip())
+
+
+class _VisibleText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in {"td", "th", "tr", "br", "p", "div", "li"}:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def extract_html_text(document: str) -> str:
+    parser = _VisibleText()
+    parser.feed(document)
+    return " ".join(parser.parts)
 
 
 def image_sources(document: str) -> list[str]:
