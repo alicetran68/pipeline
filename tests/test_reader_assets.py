@@ -2098,6 +2098,14 @@ class PublicationTests(unittest.TestCase):
             "objects/aa/document.docx", "objects/bb/document.html", "objects/cc/document.epub",
         ])
 
+    def test_spreadsheet_page_manifest_is_not_a_staging_pdf(self):
+        data = {"results": [
+            {"status": "ready", "reader_mode": "pdf", "path": "objects/aa/page-manifest.json",
+             "page_stream": True},
+            {"status": "ready", "reader_mode": "pdf", "path": "staging/pdf/bb/document.pdf"},
+        ]}
+        self.assertEqual(publish_reader_assets.staging_paths(data), ["staging/pdf/bb/document.pdf"])
+
     def test_bucket_chapter_artifacts_and_manifest_use_ebook_prefix(self):
         chapter_manifest = "objects/aa/epub-chapters/chapter-manifest.json"
         data = {"version": 1, "bucket_migration": True, "results": [{

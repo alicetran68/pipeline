@@ -113,6 +113,7 @@ def staging_paths(data: dict) -> list[str]:
     return sorted({result["path"] for result in data.get("results", [])
                    if result.get("status") == "ready"
                    and result.get("reader_mode") in BUCKET_STAGING_MODES
+                   and not result.get("page_stream")
                    and isinstance(result.get("path"), str)})
 
 
