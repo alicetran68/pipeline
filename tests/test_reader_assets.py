@@ -1634,6 +1634,10 @@ aW1hZ2U=
                       convert_reader_assets.spreadsheet_text_key(
                           convert_reader_assets.extract_html_text(html_text)))
 
+    def test_spreadsheet_text_integrity_allows_inline_html_runs_but_not_missing_characters(self):
+        self.assertTrue(convert_reader_assets.spreadsheet_text_present("abcdefghij", "abcdeXfghij"))
+        self.assertFalse(convert_reader_assets.spreadsheet_text_present("abcdefghij", "abcdeXghij"))
+
     def test_spreadsheet_screenshot_keeps_full_natural_extent(self):
         class FakePage:
             def __init__(self):

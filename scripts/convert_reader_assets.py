@@ -1403,21 +1403,12 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
     exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in html_pages)
     visible_html = spreadsheet_text_key(extract_html_text(exported_html))
     missing_values = [value for value in expected_values
-                      if not any(spreadsheet_text_key(candidate) in visible_html
-                                 for candidate in spreadsheet_text_variants(value))]
+                      if not spreadsheet_text_present(value, visible_html)]
     if missing_values:
-        diagnostics = []
-        for value in missing_values[:8]:
-            key = spreadsheet_text_key(value)
-            probe_size = min(64, len(key))
-            diagnostics.append({
-                "chars": len(key),
-                "prefix_present": key[:probe_size] in visible_html,
-                "suffix_present": key[-probe_size:] in visible_html,
-            })
+        diagnostics = [len(spreadsheet_text_key(value)) for value in missing_values[:8]]
         raise RuntimeError(
             f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s); "
-            f"text diagnostics: {diagnostics!r}"
+            f"normalized cell lengths: {diagnostics!r}"
         )
     exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
                           for page in html_pages)
@@ -1574,6 +1565,33 @@ def spreadsheet_text_variants(value: str) -> set[str]:
 def spreadsheet_text_key(value: str) -> str:
     """Ignore layout whitespace inserted or normalized by HTML export."""
     return re.sub(r"\s+", "", value)
+
+
+def spreadsheet_text_present(value: str, rendered_text: str) -> bool:
+    for candidate in spreadsheet_text_variants(value):
+        key = spreadsheet_text_key(candidate)
+        if not key or key in rendered_text:
+            return True
+        anchor_size = min(32, max(1, len(key) // 3))
+        prefix, suffix = key[:anchor_size], key[-anchor_size:]
+        start = rendered_text.find(prefix)
+        while start >= 0:
+            suffix_start = rendered_text.find(suffix, start + len(prefix))
+            while suffix_start >= 0:
+                end = suffix_start + len(suffix)
+                if end - start <= len(key) * 4 + 512:
+                    window = rendered_text[start:end]
+                    position = 0
+                    for char in key:
+                        position = window.find(char, position)
+                        if position < 0:
+                            break
+                        position += 1
+                    else:
+                        return True
+                suffix_start = rendered_text.find(suffix, suffix_start + 1)
+            start = rendered_text.find(prefix, start + 1)
+    return False
 
 
 class _ImageSources(HTMLParser):
