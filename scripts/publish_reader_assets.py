@@ -484,7 +484,8 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
             if result.get("reader_mode") in BUCKET_READER_MODES:
                 entry["bucket"] = READER_ASSETS_BUCKET
             if (result.get("reader_mode") in BUCKET_STAGING_MODES
-                    and result.get("pdf_to_dataset") is not True):
+                    and result.get("pdf_to_dataset") is not True
+                    and not result.get("page_stream")):
                 entry["bucket"] = READER_STAGING_BUCKET
                 entry["bucket_staging"] = True
             if result.get("page_stream"):
@@ -623,7 +624,10 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                             or result.get("chapter_manifest")):
                         continue
                     result_with_paths = dict(result)
-                    result_with_paths["bucket_staging"] = result.get("reader_mode") in BUCKET_STAGING_MODES
+                    result_with_paths["bucket_staging"] = (
+                        result.get("reader_mode") in BUCKET_STAGING_MODES
+                        and not result.get("page_stream")
+                    )
                     result_with_paths["bucket_paths"] = bucket_paths({"results": [result]}, bundle)
                     lifecycle_updates.append(staging_record(result_with_paths))
                 lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -726,7 +730,10 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                         or result.get("chapter_manifest")):
                     continue
                 item = dict(result)
-                item["bucket_staging"] = result.get("reader_mode") in BUCKET_STAGING_MODES
+                item["bucket_staging"] = (
+                    result.get("reader_mode") in BUCKET_STAGING_MODES
+                    and not result.get("page_stream")
+                )
                 item["bucket_paths"] = bucket_paths(
                     {"results": [result]}, (artifact_roots or {}).get(result.get("path"), bundle))
                 updates.append(staging_record(item))

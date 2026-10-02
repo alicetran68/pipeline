@@ -1804,6 +1804,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             item["profile"], extension=item["extension"],
             source_revision=item["source_revision"], key=item["key"],
         )
+        if item.get("output_name") == "page-manifest.json":
+            profile_path = hashlib.sha256(item["key"].encode("utf-8")).hexdigest()[:16]
         reusable_path = existing.get("path") if existing else None
         can_reuse_path = bool(reusable_path) and (
             not item.get("bucket_staging") or reusable_path.startswith("staging/pdf/")
