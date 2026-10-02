@@ -1782,7 +1782,13 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
                 time.sleep(2)
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
         if item.get("output_name") == "page-manifest.json":
-            convert_spreadsheet_to_pages(source, target, work, item, source_sha256, object_path)
+            spreadsheet_source = source
+            if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
+                spreadsheet_source = work / "spreadsheet-source.xls"
+                shutil.copyfile(source, spreadsheet_source)
+            convert_spreadsheet_to_pages(
+                spreadsheet_source, target, work, item, source_sha256, object_path,
+            )
             return
         out = work / "office-pdf"
         out.mkdir()

@@ -1655,6 +1655,21 @@ aW1hZ2U=
             self.assertEqual(manifest["page_count"], 1)
             self.assertNotIn("pages", manifest)
 
+    def test_mislabeled_ole_xlsx_uses_legacy_workbook_extension_for_html_render(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "source.xlsx"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"legacy workbook")
+            with patch.object(convert_reader_assets, "convert_spreadsheet_to_pages") as convert:
+                convert_reader_assets.convert_file(
+                    {"extension": "xlsx", "output_name": "page-manifest.json"},
+                    source, work / "page-manifest.json", work, "a" * 64,
+                    "objects/aa/" + "a" * 64 + "/1234567890abcdef/page-manifest.json",
+                )
+            rendered_source = convert.call_args.args[0]
+            self.assertEqual(rendered_source.suffix, ".xls")
+            self.assertEqual(rendered_source.read_bytes(), source.read_bytes())
+
     def test_epub_content_validation_rejects_missing_image_resources(self):
         with tempfile.TemporaryDirectory() as root:
             epub = Path(root) / "missing-image.epub"
