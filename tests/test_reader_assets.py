@@ -1624,6 +1624,33 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "page manifest is invalid"):
                 convert_reader_assets.validate_page_manifest(manifest)
 
+    def test_spreadsheet_page_stream_overrides_older_pdf_and_ocr_renderings(self):
+        key = "VoiceOfML/Test\0sheet.xls"
+        source = "objects/aa/" + "a" * 64
+        spreadsheet_path = source + "/" + "b" * 16 + "/page-manifest.json"
+        pdf_path = source + "/old-pdf/pages/page-manifest.json"
+        ocr_path = source + "/old-ocr/pages/page-manifest.json"
+        manifest = {"files": {key: {
+            "status": "ready", "reader_mode": "pdf", "source_extension": "xls",
+            "profile": reader_assets.SPREADSHEET_PAGE_PROFILE, "path": spreadsheet_path,
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
+        }}}
+        pdf_manifest = {"files": {key: {
+            "status": "ready", "strategy": "sampled-webp",
+            "render_profile": build_reader_assets_index.PDF_PROFILE,
+            "decision_profile": build_reader_assets_index.PDF_DECISION_PROFILE,
+            "path": pdf_path,
+        }}}
+        ocr_manifest = {"files": {key: {
+            "status": "rendered", "page_manifest": {"path": ocr_path},
+            "render_manifest": {"path": source + "/old-ocr/render-manifest.json"},
+        }}}
+        entry = build_reader_assets_index.build_index(
+            manifest, pdf_manifest=pdf_manifest, ocr_manifest=ocr_manifest,
+        )["f"][key]
+        self.assertEqual(entry["p"], spreadsheet_path)
+        self.assertEqual(entry["b"], reader_assets.READER_ASSETS_BUCKET)
+
     def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
 

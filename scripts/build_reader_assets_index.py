@@ -7,11 +7,11 @@ import json
 from pathlib import Path
 
 try:
-    from .reader_assets import load_json, validate_manifest
+    from .reader_assets import SPREADSHEET_PAGE_PROFILE, load_json, validate_manifest
     from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     from . import shared
 except ImportError:
-    from reader_assets import load_json, validate_manifest
+    from reader_assets import SPREADSHEET_PAGE_PROFILE, load_json, validate_manifest
     from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     import shared
 
@@ -22,6 +22,13 @@ MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "text
 def build_index(manifest: dict, pdf_manifest: dict | None = None,
                 ocr_manifest: dict | None = None) -> dict:
     files = {}
+    spreadsheet_keys = {
+        key for key, entry in manifest["files"].items()
+        if entry.get("status") == "ready"
+        and entry.get("source_extension") in {"xls", "xlsx"}
+        and entry.get("profile") == SPREADSHEET_PAGE_PROFILE
+        and entry.get("path", "").endswith("/page-manifest.json")
+    }
     for key, entry in manifest["files"].items():
         status = entry.get("status")
         if status not in STATUS:
@@ -39,6 +46,8 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
                 compact["f"] = entry["fallback_path"]
         files[key] = compact
     for key, entry in (pdf_manifest or {}).get("files", {}).items():
+        if key in spreadsheet_keys:
+            continue
         if entry.get("status") != "ready":
             continue
         if (entry.get("strategy") != "sampled-webp"
@@ -49,6 +58,8 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
         if path:
             files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path)}
     for key, entry in (ocr_manifest or {}).get("files", {}).items():
+        if key in spreadsheet_keys:
+            continue
         # Rendering may finish before recognition (or recognition may fail).
         # Preserve its complete Reader stream during unrelated sidecar rebuilds.
         page_path = (entry.get("page_manifest") or {}).get("path")
