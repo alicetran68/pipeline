@@ -1604,10 +1604,11 @@ aW1hZ2U=
             work = Path(root)
             source = work / "sample.xlsx"
             with zipfile.ZipFile(source, "w") as archive:
-                archive.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Summary"/><sheet name="Details"/></sheets></workbook>')
-                archive.writestr("xl/sharedStrings.xml", '<sst><si><t>Year</t></si><si><t>Value</t></si><si><t>完整表格</t></si><si><t>数据</t></si></sst>')
-                archive.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>')
-                archive.writestr("xl/worksheets/sheet2.xml", '<worksheet><sheetData><row><c t="s"><v>2</v></c><c t="s"><v>3</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/workbook.xml", '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" r:id="r1"/><sheet name="Details" r:id="r2"/></sheets></workbook>')
+                archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Target="worksheets/sheet2.xml"/></Relationships>')
+                archive.writestr("xl/sharedStrings.xml", '<sst><si><t>Year</t></si><si><t>Value</t></si><si><t>完整表格</t></si><si><t>数据</t></si><si><t>隐藏资料</t></si></sst>')
+                archive.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/worksheets/sheet2.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>2</v></c><c r="B1" t="s"><v>3</v></c></row><row r="2" hidden="1"><c r="A2" t="s"><v>4</v></c></row></sheetData></worksheet>')
                 archive.writestr("xl/charts/chart1.xml", "<chart/>")
                 archive.writestr("xl/media/image1.png", b"image")
 
@@ -2778,6 +2779,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("mht|mhtml) packages=()", workflow)
         self.assertIn("pip install -r scripts/requirements-spreadsheet-render.txt", workflow)
         self.assertIn("playwright install --with-deps chromium", workflow)
+        self.assertIn("libreoffice-calc python3-uno", workflow)
         staging_section = workflow.split("      bucket_pdf_staging:\n", 1)[1].split("      dry_run:\n", 1)[0]
         self.assertIn("default: false", staging_section)
         self.assertIn("pdf-optimized", staging_section)

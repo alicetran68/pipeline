@@ -1481,16 +1481,43 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
         with zipfile.ZipFile(source) as archive:
             names = set(archive.namelist())
             workbook = ET.fromstring(archive.read("xl/workbook.xml"))
-            sheets = [node.attrib.get("name", "") for node in workbook.findall(".//{*}sheet")]
+            relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            targets = {node.attrib.get("Id"): node.attrib.get("Target", "")
+                       for node in relationships.findall(".//{*}Relationship")}
+            sheet_nodes = workbook.findall(".//{*}sheet")
+            sheets = [node.attrib.get("name", "") for node in sheet_nodes]
             shared_strings = []
             if "xl/sharedStrings.xml" in names:
                 strings = ET.fromstring(archive.read("xl/sharedStrings.xml"))
                 shared_strings = ["".join(node.itertext()) for node in strings.findall("{*}si")]
             values = []
-            for worksheet in sorted(name for name in names
-                                    if re.fullmatch(r"xl/worksheets/sheet[0-9]+\.xml", name)):
+            relationship_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+            for sheet_node in sheet_nodes:
+                target = targets.get(sheet_node.get(relationship_id), "")
+                worksheet = posixpath.normpath(target.lstrip("/") if target.startswith("/")
+                                               else posixpath.join("xl", target))
+                if worksheet not in names:
+                    raise RuntimeError(f"spreadsheet worksheet XML is missing: {sheet_node.get('name', '')}")
                 root = ET.fromstring(archive.read(worksheet))
+                hidden_rows = {int(row.get("r")) for row in root.findall(".//{*}row")
+                               if row.get("r", "").isdigit() and row.get("hidden") in {"1", "true"}}
+                hidden_columns = set()
+                for column in root.findall(".//{*}cols/{*}col"):
+                    if column.get("hidden") not in {"1", "true"}:
+                        continue
+                    first, last = int(column.get("min", "1")), int(column.get("max", "1"))
+                    hidden_columns.update(range(first, last + 1))
                 for cell in root.findall(".//{*}c"):
+                    coordinate = cell.get("r", "")
+                    row_match = re.search(r"([0-9]+)$", coordinate)
+                    column_match = re.match(r"([A-Z]+)", coordinate, re.IGNORECASE)
+                    if not row_match or not column_match or int(row_match.group(1)) in hidden_rows:
+                        continue
+                    column_number = 0
+                    for letter in column_match.group(1).upper():
+                        column_number = column_number * 26 + ord(letter) - ord("A") + 1
+                    if column_number in hidden_columns:
+                        continue
                     kind = cell.attrib.get("t")
                     if kind == "s":
                         value = cell.findtext("{*}v", "")
@@ -1517,7 +1544,13 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
             for sheet in legacy.sheets():
                 sheets.append(sheet.name)
                 for row in range(sheet.nrows):
+                    row_info = sheet.rowinfo_map.get(row)
+                    if row_info and row_info.hidden:
+                        continue
                     for column in range(sheet.ncols):
+                        column_info = sheet.colinfo_map.get(column)
+                        if column_info and column_info.hidden:
+                            continue
                         value = sheet.cell_value(row, column)
                         if isinstance(value, str) and value.strip():
                             values.append(value.strip())
