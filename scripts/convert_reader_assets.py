@@ -1621,6 +1621,9 @@ def spreadsheet_text_present(value: str, rendered_text: str) -> bool:
             position = window_end - len(window)
         if matched:
             return True
+        chunks = [key[offset:offset + 16] for offset in range(0, len(key), 16)]
+        if all(chunk in rendered_text for chunk in chunks):
+            return True
     return False
 
 

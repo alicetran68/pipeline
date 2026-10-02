@@ -1641,6 +1641,10 @@ aW1hZ2U=
         rendered = expected[:20] + "x" + expected[20:45] + "y" + expected[45:]
         self.assertTrue(convert_reader_assets.spreadsheet_text_present(expected, rendered))
         self.assertFalse(convert_reader_assets.spreadsheet_text_present(expected, rendered.replace("J", "", 1)))
+        chunked = "abcdefghijklmnop" + "qrstuvwxyzABCDEF" + "GHIJKLMNOPQRSTUV" + "WXYZ0123456789!?"
+        reordered = chunked[:16] + chunked[32:48] + chunked[16:32] + chunked[48:]
+        self.assertTrue(convert_reader_assets.spreadsheet_text_present(chunked, reordered))
+        self.assertFalse(convert_reader_assets.spreadsheet_text_present(chunked, reordered.replace(chunked[16:32], "")))
 
     def render_fake_spreadsheet(self, dimensions):
         class FakePage:
