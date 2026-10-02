@@ -1627,6 +1627,13 @@ aW1hZ2U=
     def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
 
+    def test_spreadsheet_text_key_ignores_html_layout_whitespace(self):
+        expected = "劳动者\n\t讨薪情况\n第二行"
+        html_text = "劳动者 <div>讨薪情况</div><br> 第二行"
+        self.assertIn(convert_reader_assets.spreadsheet_text_key(expected),
+                      convert_reader_assets.spreadsheet_text_key(
+                          convert_reader_assets.extract_html_text(html_text)))
+
     def test_spreadsheet_screenshot_keeps_full_natural_extent(self):
         class FakePage:
             def __init__(self):
