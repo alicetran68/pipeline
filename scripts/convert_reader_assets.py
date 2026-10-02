@@ -1406,7 +1406,10 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
                       if not any(re.sub(r"\s+", " ", candidate).strip() in visible_html
                                  for candidate in spreadsheet_text_variants(value))]
     if missing_values:
-        raise RuntimeError(f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s)")
+        samples = [value[:160] for value in missing_values[:5]]
+        raise RuntimeError(
+            f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s): {samples!r}"
+        )
     exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
                           for page in html_pages)
     if exported_images < expected_charts + expected_images:
