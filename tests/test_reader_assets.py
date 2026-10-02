@@ -1751,6 +1751,22 @@ aW1hZ2U=
             self.assertEqual(rendered_source.suffix, ".xls")
             self.assertEqual(rendered_source.read_bytes(), source.read_bytes())
 
+    def test_xls_extension_with_ooxml_content_uses_xlsx_extension_for_html_render(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "source.xls"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("xl/workbook.xml", "<workbook/>")
+            with patch.object(convert_reader_assets, "convert_spreadsheet_to_pages") as convert:
+                convert_reader_assets.convert_file(
+                    {"extension": "xls", "output_name": "page-manifest.json"},
+                    source, work / "page-manifest.json", work, "a" * 64,
+                    "objects/aa/" + "a" * 64 + "/1234567890abcdef/page-manifest.json",
+                )
+            rendered_source = convert.call_args.args[0]
+            self.assertEqual(rendered_source.suffix, ".xlsx")
+            self.assertEqual(rendered_source.read_bytes(), source.read_bytes())
+
     def test_epub_content_validation_rejects_missing_image_resources(self):
         with tempfile.TemporaryDirectory() as root:
             epub = Path(root) / "missing-image.epub"

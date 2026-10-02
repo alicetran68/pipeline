@@ -1784,6 +1784,12 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
             if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
                 spreadsheet_source = work / "spreadsheet-source.xls"
                 shutil.copyfile(source, spreadsheet_source)
+            elif ext == "xls" and zipfile.is_zipfile(source):
+                with zipfile.ZipFile(source) as workbook:
+                    is_ooxml_workbook = "xl/workbook.xml" in workbook.namelist()
+                if is_ooxml_workbook:
+                    spreadsheet_source = work / "spreadsheet-source.xlsx"
+                    shutil.copyfile(source, spreadsheet_source)
             convert_spreadsheet_to_pages(
                 spreadsheet_source, target, work, item, source_sha256, object_path,
             )
