@@ -1402,9 +1402,9 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
     if len(html_pages) < len(expected_sheets):
         raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
     exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in html_pages)
-    visible_html = re.sub(r"\s+", " ", extract_html_text(exported_html))
+    visible_html = spreadsheet_text_key(extract_html_text(exported_html))
     missing_values = [value for value in expected_values
-                      if not any(re.sub(r"\s+", " ", candidate).strip() in visible_html
+                      if not any(spreadsheet_text_key(candidate) in visible_html
                                  for candidate in spreadsheet_text_variants(value))]
     if missing_values:
         samples = [value[:160] for value in missing_values[:5]]
@@ -1561,6 +1561,11 @@ def spreadsheet_text_variants(value: str) -> set[str]:
         except (UnicodeEncodeError, UnicodeDecodeError):
             pass
     return variants
+
+
+def spreadsheet_text_key(value: str) -> str:
+    """Ignore layout whitespace inserted or normalized by HTML export."""
+    return re.sub(r"\s+", "", value)
 
 
 class _ImageSources(HTMLParser):
