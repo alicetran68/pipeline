@@ -56,12 +56,23 @@ def main():
                 raise RuntimeError("LibreOffice UNO service did not start")
             desktop = remote.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", remote)
             source_url = uno.systemPathToFileUrl(str(args.source.resolve()))
-            document = desktop.loadComponentFromURL(
-                source_url, "_blank", 0,
-                (property_value(uno, "Hidden", True),
-                 property_value(uno, "ReadOnly", True),
-                 property_value(uno, "UpdateDocMode", 3)),
+            load_properties = (
+                property_value(uno, "Hidden", True),
+                property_value(uno, "ReadOnly", True),
+                property_value(uno, "UpdateDocMode", 3),
             )
+            try:
+                document = desktop.loadComponentFromURL(source_url, "_blank", 0, load_properties)
+            except Exception as automatic_error:
+                if args.source.suffix.lower() != ".xls":
+                    raise
+                try:
+                    document = desktop.loadComponentFromURL(
+                        source_url, "_blank", 0,
+                        (*load_properties, property_value(uno, "FilterName", "MS Excel 97")),
+                    )
+                except Exception:
+                    raise automatic_error
             if document is None:
                 raise RuntimeError("LibreOffice could not open the spreadsheet")
             sheets = document.getSheets()
