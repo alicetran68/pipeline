@@ -4,6 +4,7 @@
 import argparse
 import concurrent.futures
 import base64
+import copy
 import email.policy
 import hashlib
 import html
@@ -28,6 +29,7 @@ import xml.etree.ElementTree as ET
 from email.parser import BytesParser
 from html.parser import HTMLParser
 from pathlib import Path
+from lxml import html as lxml_html
 
 import bleach
 import tinycss2
@@ -1404,6 +1406,8 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
 
     if len(html_pages) < len(expected_sheets):
         raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
+    if len(expected_values) >= 50_000 and expected_charts == 0 and expected_images == 0:
+        html_pages = split_spreadsheet_html_rows(html_pages, work / "spreadsheet-html-chunks")
     exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in html_pages)
     visible_html = spreadsheet_text_key(extract_html_text(exported_html))
     missing_values = [value for value in expected_values
@@ -1495,6 +1499,39 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
             return screenshots
         finally:
             browser.close()
+
+
+def split_spreadsheet_html_rows(html_pages: list[Path], output: Path,
+                                rows_per_chunk: int = 50) -> list[Path]:
+    output.mkdir(parents=True, exist_ok=True)
+    result = []
+    for sheet_number, source in enumerate(html_pages, 1):
+        document = lxml_html.parse(str(source))
+        tables = document.xpath("//table")
+        if not tables:
+            result.append(source)
+            continue
+        table = max(tables, key=lambda candidate: len(candidate.xpath(".//tr")))
+        rows = table.xpath(".//tr")
+        if len(rows) <= rows_per_chunk:
+            result.append(source)
+            continue
+        table_path = document.getpath(table)
+        for chunk_number, start in enumerate(range(0, len(rows), rows_per_chunk), 1):
+            end = min(len(rows), start + rows_per_chunk)
+            chunk = copy.deepcopy(document)
+            chunk_table = chunk.xpath(table_path)[0]
+            chunk_rows = chunk_table.xpath(".//tr")
+            for index in range(len(chunk_rows) - 1, -1, -1):
+                if not start <= index < end:
+                    parent = chunk_rows[index].getparent()
+                    if parent is not None:
+                        parent.remove(chunk_rows[index])
+            target = output / f"sheet-{sheet_number:04d}-chunk-{chunk_number:04d}.html"
+            target.write_bytes(lxml_html.tostring(
+                chunk, encoding="utf-8", method="html", doctype="<!DOCTYPE html>"))
+            result.append(target)
+    return result
 
 
 def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], int, int]:

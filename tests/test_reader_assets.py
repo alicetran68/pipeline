@@ -1710,6 +1710,26 @@ aW1hZ2U=
             "path": str(output / "sheet-0001-tile-0006-0002.png"),
         })
 
+    def test_large_text_only_sheet_is_split_into_complete_html_row_groups(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            source = root / "sheet.html"
+            source.write_text(
+                "<html><head><style>td{width:400px}</style></head><body><table>"
+                + "".join(f"<tr><td>row-{index}</td></tr>" for index in range(5))
+                + "</table></body></html>",
+                encoding="utf-8",
+            )
+            chunks = convert_reader_assets.split_spreadsheet_html_rows(
+                [source], root / "chunks", rows_per_chunk=2,
+            )
+            rows = []
+            for chunk_path in chunks:
+                document = convert_reader_assets.lxml_html.parse(str(chunk_path))
+                rows.extend(document.xpath("//tr/td/text()"))
+                self.assertEqual(document.xpath("//style/text()"), ["td{width:400px}"])
+        self.assertEqual(rows, [f"row-{index}" for index in range(5)])
+
     def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
         from PIL import Image
 
