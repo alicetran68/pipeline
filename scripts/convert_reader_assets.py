@@ -1439,7 +1439,10 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
         raise RuntimeError("spreadsheet image rendering requires Playwright") from exc
     screenshots = []
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox"], **({"channel": "chrome"} if chrome else {})
+        )
         try:
             page = browser.new_page(viewport={"width": 1800, "height": 1600}, device_scale_factor=1)
             for sheet_number, source in enumerate(html_pages, 1):
@@ -1472,11 +1475,36 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
 
 
 def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], int, int]:
-    import openpyxl
-
     try:
-        workbook = openpyxl.load_workbook(source, read_only=False, data_only=False)
-    except (openpyxl.utils.exceptions.InvalidFileException, zipfile.BadZipFile):
+        with zipfile.ZipFile(source) as archive:
+            names = set(archive.namelist())
+            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+            sheets = [node.attrib.get("name", "") for node in workbook.findall(".//{*}sheet")]
+            shared_strings = []
+            if "xl/sharedStrings.xml" in names:
+                strings = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared_strings = ["".join(node.itertext()) for node in strings.findall("{*}si")]
+            values = []
+            for worksheet in sorted(name for name in names
+                                    if re.fullmatch(r"xl/worksheets/sheet[0-9]+\.xml", name)):
+                root = ET.fromstring(archive.read(worksheet))
+                for cell in root.findall(".//{*}c"):
+                    kind = cell.attrib.get("t")
+                    if kind == "s":
+                        value = cell.findtext("{*}v", "")
+                        if value.isdigit() and int(value) < len(shared_strings):
+                            text = shared_strings[int(value)]
+                            if text.strip():
+                                values.append(text.strip())
+                    elif kind in {"inlineStr", "str"}:
+                        node = cell.find("{*}is") if kind == "inlineStr" else cell.find("{*}v")
+                        text = "".join(node.itertext()) if node is not None else ""
+                        if text.strip():
+                            values.append(text.strip())
+            charts = sum(name.startswith("xl/charts/chart") and name.endswith(".xml") for name in names)
+            images = sum(name.startswith("xl/media/") and not name.endswith("/") for name in names)
+            return sheets, values, charts, images
+    except (zipfile.BadZipFile, KeyError, ET.ParseError):
         try:
             import xlrd
             legacy = xlrd.open_workbook(str(source), on_demand=True)
@@ -1494,20 +1522,6 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
         finally:
             legacy.release_resources()
         return sheets, values, 0, 0
-    try:
-        sheets, values, charts, images = [], [], 0, 0
-        for sheet in workbook.worksheets:
-            sheets.append(sheet.title)
-            charts += len(sheet._charts)
-            images += len(sheet._images)
-            for row in sheet.iter_rows():
-                for cell in row:
-                    value = cell.value
-                    if isinstance(value, str) and value.strip() and not value.startswith("="):
-                        values.append(value.strip())
-        return sheets, values, charts, images
-    finally:
-        workbook.close()
 
 
 def spreadsheet_text_variants(value: str) -> set[str]:

@@ -1598,28 +1598,19 @@ aW1hZ2U=
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
 
     def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
-        from openpyxl import Workbook
-        from openpyxl.chart import LineChart, Reference
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source = work / "sample.xlsx"
-            workbook = Workbook()
-            first = workbook.active
-            first.title = "Summary"
-            first.append(["Year", "Value"])
-            first.append([2024, 10])
-            chart = LineChart()
-            chart.add_data(Reference(first, min_col=2, min_row=1, max_row=2), titles_from_data=True)
-            chart.set_categories(Reference(first, min_col=1, min_row=2, max_row=2))
-            first.add_chart(chart, "D2")
-            second = workbook.create_sheet("Details")
-            second.append(["完整表格", "数据"])
-            workbook.save(source)
-            workbook.close()
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("xl/workbook.xml", '<workbook><sheets><sheet name="Summary"/><sheet name="Details"/></sheets></workbook>')
+                archive.writestr("xl/sharedStrings.xml", '<sst><si><t>Year</t></si><si><t>Value</t></si><si><t>完整表格</t></si><si><t>数据</t></si></sst>')
+                archive.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/worksheets/sheet2.xml", '<worksheet><sheetData><row><c t="s"><v>2</v></c><c t="s"><v>3</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/charts/chart1.xml", "<chart/>")
+                archive.writestr("xl/media/image1.png", b"image")
 
-            output_dir = work / "spreadsheet-html"
             def export_html(command, **_kwargs):
                 html_output = Path(command[command.index("--outdir") + 1])
                 html_output.mkdir(parents=True, exist_ok=True)
@@ -1629,7 +1620,7 @@ aW1hZ2U=
                 )
                 (html_output / "sample_html_1.html").write_text(
                     '<h1>Summary</h1><table><tr><td>Year</td><td>Value</td></tr>'
-                    '<tr><td>2024</td><td>10</td></tr></table><img src="chart.png">',
+                    '<tr><td>2024</td><td>10</td></tr></table><img src="chart.png"><img src="embedded.png">',
                     encoding="utf-8",
                 )
                 (html_output / "sample_html_2.html").write_text(

@@ -175,10 +175,17 @@ jobs:
       - name: Install conversion tools
         env:
           EXTENSION: ${{ needs.plan.outputs.extension }}
+          INPUT_EXTENSION: ${{ inputs.extension || '' }}
         run: |
           packages=()
           case "${EXTENSION}" in
-            static) packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei) ;;
+            static)
+              if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
+                packages=(libreoffice-calc fontconfig fonts-noto-cjk fonts-wqy-microhei)
+              else
+                packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei)
+              fi
+              ;;
             pdf) packages=(qpdf poppler-utils) ;;
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice qpdf fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
             htm|html) packages=() ;;
@@ -199,9 +206,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${packages[@]}"
           fi
-          if [[ "${EXTENSION}" == "xls" || "${EXTENSION}" == "xlsx" ]]; then
+          if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
             pip install -r scripts/requirements-spreadsheet-render.txt
-            python -m playwright install --with-deps chromium
+            if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
+              python -m playwright install --with-deps chromium
+            fi
           fi
           if [[ "${EXTENSION}" == "caj" || "${EXTENSION}" == "kdh" ]]; then
             sudo git clone --filter=blob:none --no-checkout https://github.com/caj2pdf/caj2pdf.git /opt/caj2pdf
@@ -233,6 +242,7 @@ jobs:
           SHARD_COUNT: ${{ inputs.force == true && inputs.bucket_migrate != true && '1' || '20' }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
           SOURCE_PATH: ${{ inputs.path || '' }}
+          INPUT_EXTENSION: ${{ inputs.extension || '' }}
           RETRY_FAILED: ${{ inputs.retry_failed || 'false' }}
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
           CAJ2PDF_DIR: /opt/caj2pdf
