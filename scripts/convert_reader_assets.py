@@ -1346,7 +1346,9 @@ def validate_epub_content(path: Path) -> None:
                     raise RuntimeError("converted EPUB contains an external image")
                 image_path = posixpath.normpath(posixpath.join(posixpath.dirname(document_path), parsed.path))
                 if image_path.startswith("../") or image_path not in names:
-                    raise RuntimeError("converted EPUB image resource is missing")
+                    raise RuntimeError(
+                        f"converted EPUB image resource is missing: {document_path} <- {source}"
+                    )
                 has_image = True
             meaningful.append(has_text or has_image)
         if not any(meaningful):
