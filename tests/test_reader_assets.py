@@ -1699,6 +1699,9 @@ aW1hZ2U=
         self.assertEqual(page.viewport_sizes, [{"width": 4200, "height": 1600}])
         self.assertEqual(page.screenshots, [{"path": str(output / "sheet-0001.png"), "full_page": True}])
 
+    def test_spreadsheet_full_page_capture_stays_within_webp_edge_limit(self):
+        self.assertLessEqual(convert_reader_assets.SPREADSHEET_FULL_PAGE_MAX_EDGE, 16383)
+
     def test_huge_spreadsheet_uses_unscaled_capture_tiles(self):
         output, result, page = self.render_fake_spreadsheet({"width": 4200, "height": 9800})
         self.assertEqual(len(result), 21)
