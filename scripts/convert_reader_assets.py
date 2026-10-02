@@ -90,6 +90,8 @@ COMMAND_TIMEOUT_SECONDS = int(os.environ.get("READER_CONVERSION_COMMAND_TIMEOUT"
 SPREADSHEET_RENDER_COMMAND_TIMEOUT_SECONDS = max(
     1800, int(os.environ.get("READER_SPREADSHEET_RENDER_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS)))
 )
+SPREADSHEET_FULL_PAGE_MAX_PIXELS = 24_000_000
+SPREADSHEET_FULL_PAGE_MAX_EDGE = 30_000
 EPUB_COMMAND_TIMEOUT_SECONDS = max(1800, int(os.environ.get(
     "READER_EPUB_COMMAND_TIMEOUT", str(COMMAND_TIMEOUT_SECONDS),
 )))
@@ -1343,7 +1345,9 @@ def validate_epub_content(path: Path) -> None:
                     raise RuntimeError("converted EPUB contains an external image")
                 image_path = posixpath.normpath(posixpath.join(posixpath.dirname(document_path), parsed.path))
                 if image_path.startswith("../") or image_path not in names:
-                    raise RuntimeError("converted EPUB image resource is missing")
+                    raise RuntimeError(
+                        f"converted EPUB image resource is missing: {document_path} <- {source}"
+                    )
                 has_image = True
             meaningful.append(has_text or has_image)
         if not any(meaningful):
@@ -1459,11 +1463,35 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
                 })""")
                 if dimensions["width"] < 2 or dimensions["height"] < 2:
                     raise RuntimeError(f"spreadsheet worksheet {sheet_number} rendered blank")
-                page.set_viewport_size({"width": dimensions["width"], "height": 1600})
+                width, height = dimensions["width"], dimensions["height"]
+                if (width <= SPREADSHEET_FULL_PAGE_MAX_EDGE
+                        and height <= SPREADSHEET_FULL_PAGE_MAX_EDGE
+                        and width * height <= SPREADSHEET_FULL_PAGE_MAX_PIXELS):
+                    page.set_viewport_size({"width": width, "height": min(height, 1600)})
+                    page.wait_for_timeout(80)
+                    target = output / f"sheet-{sheet_number:04d}.png"
+                    page.screenshot(path=str(target), full_page=True)
+                    screenshots.append(target)
+                    continue
+
+                tile_width, tile_height = min(width, 1800), min(height, 1600)
+                page.set_viewport_size({"width": tile_width, "height": tile_height})
                 page.wait_for_timeout(80)
-                target = output / f"sheet-{sheet_number:04d}.png"
-                page.screenshot(path=str(target), full_page=True)
-                screenshots.append(target)
+                dimensions = page.evaluate("""() => ({
+                  width: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+                  height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
+                })""")
+                columns = max(1, (max(0, dimensions["width"] - tile_width) + 1759) // 1760 + 1)
+                rows = max(1, (max(0, dimensions["height"] - tile_height) + 1559) // 1560 + 1)
+                for row in range(rows):
+                    for column in range(columns):
+                        page.evaluate("""({x, y}) => window.scrollTo(x, y)""", {
+                            "x": column * 1760, "y": row * 1560,
+                        })
+                        page.wait_for_timeout(80)
+                        target = output / f"sheet-{sheet_number:04d}-tile-{row:04d}-{column:04d}.png"
+                        page.screenshot(path=str(target))
+                        screenshots.append(target)
             return screenshots
         finally:
             browser.close()
@@ -1572,25 +1600,27 @@ def spreadsheet_text_present(value: str, rendered_text: str) -> bool:
         key = spreadsheet_text_key(candidate)
         if not key or key in rendered_text:
             return True
-        anchor_size = min(32, max(1, len(key) // 3))
-        prefix, suffix = key[:anchor_size], key[-anchor_size:]
-        start = rendered_text.find(prefix)
-        while start >= 0:
-            suffix_start = rendered_text.find(suffix, start + len(prefix))
-            while suffix_start >= 0:
-                end = suffix_start + len(suffix)
-                if end - start <= len(key) * 4 + 512:
-                    window = rendered_text[start:end]
-                    position = 0
-                    for char in key:
-                        position = window.find(char, position)
-                        if position < 0:
-                            break
-                        position += 1
-                    else:
-                        return True
-                suffix_start = rendered_text.find(suffix, suffix_start + 1)
-            start = rendered_text.find(prefix, start + 1)
+        position = 0
+        matched = True
+        for offset in range(0, len(key), 24):
+            chunk = key[offset:offset + 24]
+            found = rendered_text.find(chunk, position)
+            if found >= 0:
+                position = found + len(chunk)
+                continue
+            window_end = min(len(rendered_text), position + len(chunk) * 8 + 512)
+            window = rendered_text[position:window_end]
+            for char in chunk:
+                char_position = window.find(char)
+                if char_position < 0:
+                    matched = False
+                    break
+                window = window[char_position + 1:]
+            if not matched:
+                break
+            position = window_end - len(window)
+        if matched:
+            return True
     return False
 
 

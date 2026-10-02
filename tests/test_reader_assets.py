@@ -1637,8 +1637,12 @@ aW1hZ2U=
     def test_spreadsheet_text_integrity_allows_inline_html_runs_but_not_missing_characters(self):
         self.assertTrue(convert_reader_assets.spreadsheet_text_present("abcdefghij", "abcdeXfghij"))
         self.assertFalse(convert_reader_assets.spreadsheet_text_present("abcdefghij", "abcdeXghij"))
+        expected = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ!?.,;:+-*/()[]{}"
+        rendered = expected[:20] + "x" + expected[20:45] + "y" + expected[45:]
+        self.assertTrue(convert_reader_assets.spreadsheet_text_present(expected, rendered))
+        self.assertFalse(convert_reader_assets.spreadsheet_text_present(expected, rendered.replace("J", "", 1)))
 
-    def test_spreadsheet_screenshot_keeps_full_natural_extent(self):
+    def render_fake_spreadsheet(self, dimensions):
         class FakePage:
             def __init__(self):
                 self.viewport_sizes = []
@@ -1652,7 +1656,7 @@ aW1hZ2U=
 
             def evaluate(self, script, *_args):
                 if "scrollWidth" in script:
-                    return {"width": 4200, "height": 9800}
+                    return dimensions
                 return None
 
             def set_viewport_size(self, size):
@@ -1683,9 +1687,24 @@ aW1hZ2U=
             output = Path(root) / "screenshots"
             output.mkdir()
             result = convert_reader_assets.render_spreadsheet_html([source], output)
+        return output, result, page
+
+    def test_spreadsheet_screenshot_keeps_full_natural_extent(self):
+        output, result, page = self.render_fake_spreadsheet({"width": 4200, "height": 5000})
         self.assertEqual(len(result), 1)
         self.assertEqual(page.viewport_sizes, [{"width": 4200, "height": 1600}])
         self.assertEqual(page.screenshots, [{"path": str(output / "sheet-0001.png"), "full_page": True}])
+
+    def test_huge_spreadsheet_uses_unscaled_capture_tiles(self):
+        output, result, page = self.render_fake_spreadsheet({"width": 4200, "height": 9800})
+        self.assertEqual(len(result), 21)
+        self.assertEqual(page.viewport_sizes, [{"width": 1800, "height": 1600}])
+        self.assertEqual(page.screenshots[0], {
+            "path": str(output / "sheet-0001-tile-0000-0000.png"),
+        })
+        self.assertEqual(page.screenshots[-1], {
+            "path": str(output / "sheet-0001-tile-0006-0002.png"),
+        })
 
     def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
         from PIL import Image
