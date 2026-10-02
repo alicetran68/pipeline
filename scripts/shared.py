@@ -9,7 +9,6 @@ from typing import TypeVar
 
 CHUNK_BYTES = 1024 * 1024
 PDF_PAGES_BUCKET = "vomebook/pdf-pages"
-PDF_RANGE_BUCKET = "vomebook/pdf-optimized"
 PDF_OCR_INPUT_BUCKET = os.environ.get("PDF_OCR_INPUT_BUCKET", "melsm")
 READER_ASSETS_BUCKET = PDF_PAGES_BUCKET
 

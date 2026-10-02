@@ -1425,7 +1425,6 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
         destination = page_root / f"page-{number:06d}.webp"
         with Image.open(image_path) as image:
             image = image.convert("RGB")
-            image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             image.save(destination, "WEBP", method=6, quality=85)
         page_count = number
     target.write_bytes(canonical_json({
@@ -1446,7 +1445,7 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
             headless=True, args=["--no-sandbox"], **({"channel": "chrome"} if chrome else {})
         )
         try:
-            page = browser.new_page(viewport={"width": 1800, "height": 1600}, device_scale_factor=1)
+            page = browser.new_page(viewport={"width": 1280, "height": 1600}, device_scale_factor=1)
             for sheet_number, source in enumerate(html_pages, 1):
                 page.goto(source.resolve().as_uri(), wait_until="load", timeout=120000)
                 page.wait_for_function(
@@ -1460,17 +1459,11 @@ def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
                 })""")
                 if dimensions["width"] < 2 or dimensions["height"] < 2:
                     raise RuntimeError(f"spreadsheet worksheet {sheet_number} rendered blank")
-                rows = (dimensions["height"] + 1559) // 1560
-                columns = (dimensions["width"] + 1759) // 1760
-                for row in range(rows):
-                    for column in range(columns):
-                        page.evaluate("""({x, y}) => window.scrollTo(x, y)""", {
-                            "x": column * 1760, "y": row * 1560,
-                        })
-                        page.wait_for_timeout(80)
-                        target = output / f"sheet-{sheet_number:04d}-tile-{row:04d}-{column:04d}.png"
-                        page.screenshot(path=str(target))
-                        screenshots.append(target)
+                page.set_viewport_size({"width": dimensions["width"], "height": 1600})
+                page.wait_for_timeout(80)
+                target = output / f"sheet-{sheet_number:04d}.png"
+                page.screenshot(path=str(target), full_page=True)
+                screenshots.append(target)
             return screenshots
         finally:
             browser.close()
@@ -1650,7 +1643,8 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
     password = explicit_password
     if not password and ext == "xlsx":
         password = os.environ.get("READER_CONVERSION_PASSWORD", "")
-    if password and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
+    ole_xlsx = ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE
+    if (password or ole_xlsx) and ext in {"doc", "docx", "ppt", "pptx", "pps", "xls", "xlsx"}:
         import msoffcrypto
         with source.open("rb") as encrypted:
             document = None
@@ -1660,6 +1654,10 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
                 if explicit_password:
                     raise
             if document is not None and document.is_encrypted():
+                if not password:
+                    raise RuntimeError(
+                        "encrypted spreadsheet requires READER_CONVERSION_PASSWORD or a source password"
+                    )
                 decrypted_source = work / f"decrypted.{ext}"
                 document.load_key(password=password)
                 with decrypted_source.open("wb") as decrypted:
@@ -1977,12 +1975,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 f"{item['key']}\0{item['profile']}".encode("utf-8")
             ).hexdigest()[:16]
         reusable_path = existing.get("path") if existing else None
-        can_reuse_path = bool(reusable_path) and (
-            not item.get("bucket_staging") or reusable_path.startswith("staging/pdf/")
-        )
-        object_path = reusable_path if can_reuse_path else (
-            f"staging/pdf/{digest[:2]}/{digest}/{profile_path}/{item['output_name']}"
-            if item.get("bucket_staging") else
+        object_path = reusable_path or (
             f"objects/{digest[:2]}/{digest}/{profile_path}/{item['output_name']}"
         )
         validate_storage_path(object_path)
@@ -2090,8 +2083,6 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             "reader_mode": item["reader_mode"], "path": object_path, "bytes": target.stat().st_size,
         "sha256": file_sha256(target), "reused": reused,
         }
-        if item.get("pdf_to_dataset"):
-            result["pdf_to_dataset"] = True
         if item["extension"] == "epub" and item["reader_mode"] == "pdf":
             result["fallback_path"] = object_path
         if item.get("output_name") == "page-manifest.json":
@@ -2144,7 +2135,6 @@ def main() -> int:
         "results": results,
         "force_rebuild": bool(queue_data.get("force_rebuild")),
         "bucket_migration": bool(queue_data.get("bucket_migration")),
-        "pdf_to_dataset": bool(queue_data.get("pdf_to_dataset")),
     }
     if queue_data.get("authoritative_snapshot") is True:
         bundle_data["active_keys"] = queue_data.get("active_keys", [])

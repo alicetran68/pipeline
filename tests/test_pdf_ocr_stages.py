@@ -594,8 +594,7 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_completed_ocr_page_stream_replaces_existing_pdf_route(self):
         result = self.render_fixture()
-        existing = {"s": 2, "m": "p", "p": "objects/old/document.pdf",
-                    "b": "vomebook/pdf-optimized"}
+        existing = {"s": 2, "m": "p", "p": "objects/old/document.pdf"}
         base = {"files": {result["key"]: {"status": "ready", "reader_mode": "pdf",
                                            "path": "ordinary.pdf"}}}
         ocr = {"files": {result["key"]: {**result, "status": "ready",
@@ -652,7 +651,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("backend:", ocr_text)
         self.assertIn("PDF_OCR_BACKEND", ocr_text)
         stages_text = (root / "scripts/pdf_ocr_stages.py").read_text()
-        self.assertIn('load_registry(api, repo, "pdf_range_manifest.json", revision)', stages_text)
+        self.assertNotIn("pdf_range_manifest.json", stages_text)
         self.assertFalse(ocr[True]["workflow_dispatch"]["inputs"]["retry_failed_only"]["default"])
         self.assertIn("--retry-failed-only", ocr_text)
         self.assertIn('default: "auto"', ocr_text)

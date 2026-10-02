@@ -18,9 +18,7 @@ def empty_manifest() -> dict:
     return {"version": LIFECYCLE_VERSION, "files": {}, "orphans": {}}
 
 
-def staging_record(result: dict, *, consumers: dict[str, str] | None = None) -> dict:
-    staging = bool(result.get("bucket_staging"))
-    range_needed = int(result.get("bytes") or result.get("source_bytes") or 0) >= 4 * 1024 * 1024
+def asset_record(result: dict) -> dict:
     return {
         "key": result["key"],
         "path": result["path"],
@@ -30,9 +28,8 @@ def staging_record(result: dict, *, consumers: dict[str, str] | None = None) -> 
         "source_sha256": result.get("source_sha256", ""),
         "source_revision": result.get("source_revision", ""),
         "profile": result.get("profile", ""),
-        "phase": "staging" if staging else "final",
-        "consumers": dict(consumers or ({"render": "pending", "range": "pending" if range_needed else "not-needed"}
-                                         if staging else {})),
+        "phase": "final",
+        "consumers": {},
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
@@ -53,33 +50,6 @@ def merge(manifest: dict, updates: list[dict]) -> dict:
             merged["created_at"] = previous["created_at"]
         result["files"][key] = merged
     return result
-
-
-def consumer_done(manifest: dict, key: str, consumer: str) -> bool:
-    entry = manifest.get("files", {}).get(key, {})
-    return entry.get("consumers", {}).get(consumer) in TERMINAL_SUCCESS
-
-
-def collectible(entry: dict, *, require: tuple[str, ...] = ("render", "range")) -> bool:
-    if not isinstance(entry, dict) or entry.get("phase") not in {"staging", "processing"}:
-        return False
-    consumers = entry.get("consumers")
-    if not isinstance(consumers, dict):
-        return False
-    return all(consumers.get(name) in TERMINAL_SUCCESS or consumers.get(name) == "not-needed"
-               for name in require)
-
-
-def mark_consumer(manifest: dict, key: str, consumer: str, status: str) -> dict:
-    entry = manifest.get("files", {}).get(key)
-    if not isinstance(entry, dict):
-        return manifest
-    consumers = dict(entry.get("consumers") or {})
-    consumers[consumer] = status
-    entry = {**entry, "consumers": consumers,
-             "phase": "final" if collectible({**entry, "consumers": consumers}) else "processing",
-             "updated_at": now_iso()}
-    return {**manifest, "files": {**manifest["files"], key: entry}}
 
 
 def mark_orphans(manifest: dict, paths: set[str], today: str) -> dict:

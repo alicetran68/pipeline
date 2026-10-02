@@ -10,12 +10,10 @@ class ReaderAssetConcurrencyTests(unittest.TestCase):
         for filename in (
             "reader-assets.yml", "pdf-assets-worker.yml",
             "migrate-pdf-page-manifests.yml",
-            "migrate-pdf-range-bucket.yml",
         ):
             workflow = (ROOT / filename).read_text(encoding="utf-8")
             self.assertIn("group: reader-assets", workflow, filename)
             self.assertNotIn("group: reader-assets-pdf", workflow, filename)
-            self.assertNotIn("group: pdf-range-assets", workflow, filename)
             self.assertIn("cancel-in-progress: false", workflow, filename)
             self.assertIn("queue: max", workflow, filename)
 

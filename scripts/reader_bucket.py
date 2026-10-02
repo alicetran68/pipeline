@@ -20,7 +20,6 @@ INDEX_FILES = {
     "sidecar": f"{INDEX_PREFIX}/reader_assets.json.gz",
     "pdf": f"{INDEX_PREFIX}/pdf_manifest.json",
     "ocr": f"{INDEX_PREFIX}/pdf_ocr_manifest.json",
-    "range": f"{INDEX_PREFIX}/pdf_range_manifest.json",
     "lifecycle": f"{INDEX_PREFIX}/reader_lifecycle.json",
 }
 
@@ -74,7 +73,6 @@ def publish_json(path: str, payload: dict, token: str | None = None) -> None:
     finally:
         local.unlink(missing_ok=True)
 
-
 def publish_bytes(path: str, payload: bytes, token: str | None = None) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix="reader-bucket-index-", suffix=".bin")
     os.close(descriptor)
@@ -84,15 +82,3 @@ def publish_bytes(path: str, payload: bytes, token: str | None = None) -> None:
         batch_bucket_files(READER_ASSETS_BUCKET, add=[(str(local), path)], token=token)
     finally:
         local.unlink(missing_ok=True)
-
-
-def update_lifecycle_consumer(key: str, consumer: str, status: str, token: str | None = None) -> None:
-    try:
-        from .reader_lifecycle import mark_consumer
-    except ImportError:
-        from reader_lifecycle import mark_consumer
-    try:
-        current = read_json(INDEX_FILES["lifecycle"], token)
-    except (FileNotFoundError, OSError, ValueError):
-        return
-    publish_json(INDEX_FILES["lifecycle"], mark_consumer(current, key, consumer, status), token)

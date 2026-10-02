@@ -18,23 +18,21 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 try:
     from .build_reader_assets_index import encode_index
-    from .pdf_range_state import remote_state
     from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes, read_json as read_bucket_json, stage_index
-    from .reader_lifecycle import merge as merge_lifecycle, staging_record
+    from .reader_lifecycle import merge as merge_lifecycle, asset_record
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_storage_path,
-        READER_ASSETS_BUCKET, READER_STAGING_BUCKET,
+        READER_ASSETS_BUCKET,
     )
 except ImportError:
     from build_reader_assets_index import encode_index
-    from pdf_range_state import remote_state
     from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes, read_json as read_bucket_json, stage_index
-    from reader_lifecycle import merge as merge_lifecycle, staging_record
+    from reader_lifecycle import merge as merge_lifecycle, asset_record
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_storage_path,
-        READER_ASSETS_BUCKET, READER_STAGING_BUCKET,
+        READER_ASSETS_BUCKET,
     )
 
 try:
@@ -44,7 +42,6 @@ except ImportError:
 
 SIDECAR_NAME = "reader_assets.json.gz"
 BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "epub"}
-BUCKET_STAGING_MODES = {"pdf"}
 EBOOK_CHAPTERS_PREFIX = "ebook-chapters/"
 
 
@@ -86,9 +83,9 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
-        if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
+        if result.get("reader_mode") == "pdf" and not result.get("page_stream"):
             continue
-        if (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
+        if ((result.get("reader_mode") in BUCKET_READER_MODES or result.get("page_stream"))
                 and isinstance(result.get("path"), str)):
             paths.add(result["path"])
             if result.get("page_stream") and bundle is not None:
@@ -109,14 +106,6 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
     return sorted(paths)
 
 
-def staging_paths(data: dict) -> list[str]:
-    return sorted({result["path"] for result in data.get("results", [])
-                   if result.get("status") == "ready"
-                   and result.get("reader_mode") in BUCKET_STAGING_MODES
-                   and not result.get("page_stream")
-                   and isinstance(result.get("path"), str)})
-
-
 def load_bundle_data(bundle: Path) -> dict:
     data = load_json(bundle / "bundle.json")
     if data.get("version") != 1 or not isinstance(data.get("results"), list):
@@ -132,9 +121,8 @@ def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
     force_values = {bool(item.get("force_rebuild")) for item in data}
     authoritative_values = {bool(item.get("authoritative_snapshot")) for item in data}
     migration_values = {bool(item.get("bucket_migration")) for item in data}
-    pdf_dataset_values = {bool(item.get("pdf_to_dataset")) for item in data}
     if (len(force_values) > 1 or len(authoritative_values) > 1
-            or len(migration_values) > 1 or len(pdf_dataset_values) > 1):
+            or len(migration_values) > 1):
         raise ValueError("reader asset bundles have incompatible publication modes")
     results = []
     roots: dict[str, Path] = {}
@@ -162,7 +150,6 @@ def combine_bundles(bundles: list[Path]) -> tuple[dict, dict[str, Path]]:
         "force_rebuild": force_values.pop(),
         "authoritative_snapshot": authoritative_values.pop(),
         "bucket_migration": migration_values.pop(),
-        "pdf_to_dataset": pdf_dataset_values.pop(),
         "active_keys": active_keys,
     }
     return combined, roots
@@ -174,7 +161,7 @@ def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = Non
     for result in data.get("results", []):
         if result.get("status") != "ready":
             continue
-        if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
+        if result.get("reader_mode") == "pdf" and not result.get("page_stream"):
             continue
         path = result.get("path")
         root = roots.get(path, bundle)
@@ -226,7 +213,7 @@ def sync_artifacts(artifacts: dict[str, tuple[Path, str]], token: str, bucket: s
 
 def s3_upload_enabled(bucket: str) -> bool:
     """Use object-level S3 uploads when credentials are available."""
-    return bucket in {READER_ASSETS_BUCKET, READER_STAGING_BUCKET} and bool(
+    return bucket == READER_ASSETS_BUCKET and bool(
         os.environ.get("HF_S3_ACCESS_KEY_ID") and os.environ.get("HF_S3_SECRET_ACCESS_KEY")
     )
 
@@ -424,7 +411,7 @@ def remote_pdf_ocr_manifest(api: HfApi, repo_id: str, revision: str | None = Non
 
 
 def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None = None,
-                  range_manifest: dict | None = None, *, data_override: dict | None = None,
+                  *, data_override: dict | None = None,
                   artifact_roots: dict[str, Path] | None = None):
     data = data_override if data_override is not None else load_bundle_data(bundle)
     if data.get("version") != 1 or not isinstance(data.get("results"), list):
@@ -488,13 +475,9 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                             path = (remote_prefix / child.relative_to(root)).as_posix()
                             validate_storage_path(path)
                             artifacts[path] = str(child)
-            if result.get("reader_mode") in BUCKET_READER_MODES:
+            if (result.get("reader_mode") in BUCKET_READER_MODES
+                    or result.get("page_stream")):
                 entry["bucket"] = READER_ASSETS_BUCKET
-            if (result.get("reader_mode") in BUCKET_STAGING_MODES
-                    and result.get("pdf_to_dataset") is not True
-                    and not result.get("page_stream")):
-                entry["bucket"] = READER_STAGING_BUCKET
-                entry["bucket_staging"] = True
             if result.get("page_stream"):
                 entry["bucket"] = READER_ASSETS_BUCKET
             if result.get("chapter_manifest"):
@@ -556,7 +539,7 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
     ]
     operations.append(CommitOperationAdd(path_in_repo=MANIFEST_NAME, path_or_fileobj=canonical_json(updated, pretty=True)))
     operations.append(CommitOperationAdd(
-        path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest, range_manifest, ocr_manifest)))
+        path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_index(updated, pdf_manifest, ocr_manifest)))
     return updated, operations
 
 
@@ -583,7 +566,7 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                                 if result.get("status") == "ready"] if type(api) is not HfApi else
                                [result for result in data.get("results", [])
                                 if result.get("status") == "ready"
-                                and result.get("reader_mode") not in BUCKET_READER_MODES | BUCKET_STAGING_MODES
+                                 and result.get("reader_mode") not in BUCKET_READER_MODES
                                 and not (result.get("reader_mode") == "foliate"
                                          and result.get("chapter_manifest"))])
             if not objects_uploaded and dataset_objects:
@@ -598,13 +581,9 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
             if not bucket_uploaded:
                 bucket_token = os.environ.get("HF_TOKEN")
                 if bucket_token and type(api) is HfApi:
-                    staging = set(staging_paths(data))
-                    _sync_bucket_with_retry(str(bundle), bucket_token,
-                                            [path for path in bucket_paths(data, bundle) if path not in staging])
-                    _sync_bucket_with_retry(str(bundle), bucket_token, sorted(staging), READER_STAGING_BUCKET)
+                    _sync_bucket_with_retry(str(bundle), bucket_token, bucket_paths(data, bundle))
                 bucket_uploaded = True
-            range_manifest = remote_state(api, repo_id, revision)
-            manifest, operations = build_publish(api, repo_id, bundle, revision, range_manifest)
+            manifest, operations = build_publish(api, repo_id, bundle, revision)
             operations = [operation for operation in operations
                           if operation.path_in_repo in {MANIFEST_NAME, SIDECAR_NAME}]
             api.create_commit(
@@ -627,16 +606,12 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
                 for result in data.get("results", []):
                     if result.get("status") != "ready":
                         continue
-                    if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
+                    if not (result.get("reader_mode") in BUCKET_READER_MODES or result.get("page_stream")
                             or result.get("chapter_manifest")):
                         continue
                     result_with_paths = dict(result)
-                    result_with_paths["bucket_staging"] = (
-                        result.get("reader_mode") in BUCKET_STAGING_MODES
-                        and not result.get("page_stream")
-                    )
                     result_with_paths["bucket_paths"] = bucket_paths({"results": [result]}, bundle)
-                    lifecycle_updates.append(staging_record(result_with_paths))
+                    lifecycle_updates.append(asset_record(result_with_paths))
                 lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
                 lifecycle_path.write_text(json.dumps(merge_lifecycle(lifecycle, lifecycle_updates),
                                                      ensure_ascii=False, sort_keys=True, indent=2) + "\n",
@@ -661,14 +636,15 @@ def publish_bundle(api: HfApi, repo_id: str, bundle: Path, *, max_attempts: int 
 def publish_dataset_pdf_artifacts(api: HfApi, repo_id: str, data: dict,
                                   bundle: Path, artifact_roots: dict[str, Path] | None = None,
                                   max_attempts: int = 20) -> None:
-    """Publish generated PDFs to the Dataset while indexing them in the bucket."""
-    if not any(result.get("pdf_to_dataset") for result in data.get("results", [])):
+    """Publish non-page-stream Reader PDFs to the Dataset."""
+    if not any(result.get("status") == "ready" and result.get("reader_mode") == "pdf"
+               and not result.get("page_stream") for result in data.get("results", [])):
         return
     artifact_roots = artifact_roots or {}
     artifacts = {}
     for result in data.get("results", []):
         if (result.get("status") != "ready" or result.get("reader_mode") != "pdf"
-                or result.get("pdf_to_dataset") is not True):
+                or result.get("page_stream")):
             continue
         path = result.get("path")
         root = artifact_roots.get(path, bundle)
@@ -707,21 +683,14 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             current = remote_manifest(api, repo_id)
             if attempt and bundle_is_published(current, data):
                 return current, 0
-            range_manifest = remote_state(api, repo_id)
             manifest, operations = build_publish(
-                api, repo_id, bundle, None, range_manifest,
+                api, repo_id, bundle, None,
                 data_override=data, artifact_roots=artifact_roots,
             )
             publish_dataset_pdf_artifacts(api, repo_id, data, bundle, artifact_roots, max_attempts)
             artifacts = artifact_files(data, artifact_roots or {}, bundle)
             if artifacts:
-                staging = set(staging_paths(data))
-                regular = {path: value for path, value in artifacts.items() if path not in staging}
-                staged = {path: value for path, value in artifacts.items() if path in staging}
-                if regular:
-                    sync_artifacts(regular, token, READER_ASSETS_BUCKET)
-                if staged:
-                    sync_artifacts(staged, token, READER_STAGING_BUCKET)
+                sync_artifacts(artifacts, token, READER_ASSETS_BUCKET)
             lifecycle = {"version": 1, "files": {}, "orphans": {}}
             try:
                 lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], token)
@@ -731,19 +700,15 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             for result in data.get("results", []):
                 if result.get("status") != "ready":
                     continue
-                if result.get("reader_mode") == "pdf" and result.get("pdf_to_dataset") is True:
+                if result.get("reader_mode") == "pdf" and not result.get("page_stream"):
                     continue
-                if not (result.get("reader_mode") in BUCKET_READER_MODES | BUCKET_STAGING_MODES
+                if not (result.get("reader_mode") in BUCKET_READER_MODES or result.get("page_stream")
                         or result.get("chapter_manifest")):
                     continue
                 item = dict(result)
-                item["bucket_staging"] = (
-                    result.get("reader_mode") in BUCKET_STAGING_MODES
-                    and not result.get("page_stream")
-                )
                 item["bucket_paths"] = bucket_paths(
                     {"results": [result]}, (artifact_roots or {}).get(result.get("path"), bundle))
-                updates.append(staging_record(item))
+                updates.append(asset_record(item))
             lifecycle = merge_lifecycle(lifecycle, updates)
             with tempfile.TemporaryDirectory(prefix="reader-index-") as root:
                 index_root = Path(root) / "reader-index"

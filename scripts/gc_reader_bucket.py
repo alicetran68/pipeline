@@ -12,12 +12,12 @@ import posixpath
 from datetime import date, timedelta
 
 try:
-    from .reader_assets import READER_ASSETS_BUCKET, READER_STAGING_BUCKET
+    from .reader_assets import READER_ASSETS_BUCKET
     from .shared import PDF_OCR_INPUT_BUCKET
     from .reader_bucket import INDEX_PREFIX
     from .reader_lifecycle import LIFECYCLE_NAME, mark_orphans
 except ImportError:
-    from reader_assets import READER_ASSETS_BUCKET, READER_STAGING_BUCKET
+    from reader_assets import READER_ASSETS_BUCKET
     from shared import PDF_OCR_INPUT_BUCKET
     from reader_bucket import INDEX_PREFIX
     from reader_lifecycle import LIFECYCLE_NAME, mark_orphans
@@ -199,32 +199,8 @@ def collect_paths(value, output: set[str]) -> None:
         for item in value:
             collect_paths(item, output)
     elif isinstance(value, str) and (
-            value.startswith("objects/") or value.startswith("ebook-chapters/")
-            or value.startswith("staging/")):
+            value.startswith("objects/") or value.startswith("ebook-chapters/")):
         output.add(value)
-
-
-def collect_bucket_paths(value, bucket: str, output: set[str]) -> None:
-    """Collect paths explicitly assigned to a bucket by a Reader sidecar."""
-    if isinstance(value, dict):
-        if value.get("b") == bucket:
-            for field in ("p", "path"):
-                path = value.get(field)
-                if isinstance(path, str):
-                    output.add(path)
-        if value.get("ob") == bucket:
-            path = value.get("f")
-            if isinstance(path, str):
-                output.add(path)
-        if value.get("cb") == bucket:
-            path = value.get("c")
-            if isinstance(path, str):
-                output.add(path)
-        for item in value.values():
-            collect_bucket_paths(item, bucket, output)
-    elif isinstance(value, list):
-        for item in value:
-            collect_bucket_paths(item, bucket, output)
 
 
 def bucket_files(store: S3BucketStore, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
@@ -264,14 +240,8 @@ def current_references(files: set[str], lifecycle: dict, payloads: dict[str, dic
                     references.update(entry.get("paths") or [entry.get("path", "")])
         elif path.endswith("/manifest.json"):
             active_keys = {key for key, value in payload.get("files", {}).items()
-                           if isinstance(value, dict) and value.get("status") == "ready"
-                           and not value.get("bucket_staging")}
-            filtered = dict(payload)
-            filtered["files"] = {
-                key: value for key, value in payload.get("files", {}).items()
-                if not isinstance(value, dict) or not value.get("bucket_staging")
-            }
-            collect_paths(filtered, references)
+                           if isinstance(value, dict) and value.get("status") == "ready"}
+            collect_paths(payload, references)
         else:
             collect_paths(payload, references)
     return references
@@ -359,24 +329,13 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     input_candidates = {f"{PDF_OCR_INPUT_BUCKET}:{path}" for path in input_files
                         if path not in input_references}
     candidates.update(input_candidates)
-    staging_files = bucket_files(store, READER_STAGING_BUCKET, ("objects/", "staging/"))
-    print(f"listed {READER_STAGING_BUCKET}: {len(staging_files)} object(s)")
-    staging_references: set[str] = set()
-    for payload in payloads.values():
-        collect_bucket_paths(payload, READER_STAGING_BUCKET, staging_references)
-    staging_references.update(path for path in references if path.startswith("staging/pdf/"))
-    staging_candidates = {f"{READER_STAGING_BUCKET}:{path}" for path in staging_files
-                          if path not in staging_references}
-    candidates.update(staging_candidates)
     if jxl_only:
         candidates = {path for path in candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
         asset_candidates = {path for path in asset_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
         input_candidates = {path for path in input_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
-        staging_candidates = {path for path in staging_candidates if path.rsplit(":", 1)[-1].lower().endswith(".jxl")}
     if jxl_inventory_only:
         asset_candidates = set()
         input_candidates = set()
-        staging_candidates = set()
         candidates = set()
     if force_jxl_delete:
         candidates = {
@@ -385,7 +344,7 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
         }
     updated = mark_orphans(lifecycle, candidates, date.today().isoformat())
     cutoff = date.today() - timedelta(days=grace_days)
-    expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], READER_STAGING_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
+    expired: dict[str, list[str]] = {READER_ASSETS_BUCKET: [], PDF_OCR_INPUT_BUCKET: []}
     for path, entry in updated.get("orphans", {}).items():
         try:
             since = date.fromisoformat(entry["since"])
@@ -398,7 +357,6 @@ def plan_gc(store: S3BucketStore, grace_days: int, limit: int,
     for bucket in expired:
         expired[bucket] = apply_limit(expired[bucket], limit)
     counts = {READER_ASSETS_BUCKET: len(asset_candidates),
-              READER_STAGING_BUCKET: len(staging_candidates),
               PDF_OCR_INPUT_BUCKET: len(input_candidates)}
     counts["__jxl_total"] = jxl_total
     counts["__jxl_referenced"] = jxl_referenced

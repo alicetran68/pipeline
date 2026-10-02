@@ -169,14 +169,6 @@ class PdfOcrContractTests(unittest.TestCase):
                 self.assertEqual(pdf_ocr.detect_language(key), language)
                 self.assertEqual(pdf_ocr.book_ocr_config({"key": key}), (language, backend))
 
-    def test_failed_structure_assessment_marks_source_for_image_render(self):
-        item = {"key": "repo\0book.pdf", "repo": "repo", "path": "book.pdf"}
-        with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[item]):
-            records = pdf_ocr.source_records(Path("unused"), Path("unused"), range_manifest={
-                "files": {item["key"]: {"status": "failed", "reason": "slow PDF"}}})
-        self.assertEqual(records[0]["range_status"], "failed")
-        self.assertTrue(records[0]["force_image_render"])
-
     def test_gbk_repaired_reader_pdf_replaces_original_in_ocr_sources(self):
         repo, path = next(iter(pdf_ocr.reader_assets.KNOWN_GBK_PDFS))
         original = {"key": repo + "\0" + path, "repo": repo, "path": path,

@@ -31,12 +31,12 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     from .run_pdf_ocr import source_path, _bucket_retry_delay
-    from .reader_bucket import index_path, publish_bytes, publish_json, read_json as read_bucket_json, update_lifecycle_consumer
+    from .reader_bucket import index_path, publish_bytes, publish_json, read_json as read_bucket_json
 except ImportError:
     import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout
     import pdf_render_schedule
     from run_pdf_ocr import source_path, _bucket_retry_delay
-    from reader_bucket import index_path, publish_bytes, publish_json, read_json as read_bucket_json, update_lifecycle_consumer
+    from reader_bucket import index_path, publish_bytes, publish_json, read_json as read_bucket_json
 
 RENDER_REGISTRY = "pdf_render_manifest.json"
 PROGRESS_REGISTRY = "pdf_ocr_progress.json"
@@ -201,10 +201,6 @@ def save_registry(api, repo, name, updates, merge=None, publish_streams=False):
                 if publish_streams:
                     publish_json(index_path(publication.OCR_MANIFEST_NAME), ocr_state, token)
                     publish_bytes(index_path(publication.SIDECAR_NAME), publication.encode_sidecar(sidecar), token)
-                if name == RENDER_REGISTRY:
-                    for key, value in updates.items():
-                        update_lifecycle_consumer(
-                            key, "render", "done" if value.get("status") in {"ready", "skipped"} else "failed", token)
             return
         except HfHubHTTPError as exc:
             if not shared.is_retryable_hf_status(shared.hf_status_code(exc)) or attempt == 19:
@@ -927,8 +923,7 @@ def main():
         if args.stage == "plan-render":
             assets = load_registry(api, repo, "manifest.json", revision)
             assets["revision"] = revision
-            range_state = load_registry(api, repo, "pdf_range_manifest.json", revision)
-            records = pdf_ocr.source_records(args.search_data, args.revisions, assets, range_manifest=range_state)
+            records = pdf_ocr.source_records(args.search_data, args.revisions, assets)
             records = pending_render(records, rendered, current, args.retry_failed, args.partition)
             selected = pdf_ocr.queue(records, args.limit, args.checkpoint)
             render_progress = load_registry(api, repo, RENDER_PROGRESS_REGISTRY, revision)["files"]

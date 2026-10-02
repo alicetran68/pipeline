@@ -4,21 +4,13 @@ from scripts import reader_lifecycle
 
 
 class ReaderLifecycleTests(unittest.TestCase):
-    def test_staging_record_tracks_render_and_range_consumers(self):
-        record = reader_lifecycle.staging_record({
+    def test_reader_assets_are_final_and_have_no_staging_consumers(self):
+        record = reader_lifecycle.asset_record({
             "key": "repo\0book.pdf", "path": "objects/aa/document.pdf",
-            "source_bytes": 8 * 1024 * 1024, "bucket_staging": True,
+            "source_bytes": 8 * 1024 * 1024,
         })
-        self.assertEqual(record["phase"], "staging")
-        self.assertEqual(record["consumers"], {"render": "pending", "range": "pending"})
-
-    def test_completed_consumers_make_staging_object_collectible(self):
-        record = reader_lifecycle.staging_record({
-            "key": "repo\0book.pdf", "path": "objects/aa/document.pdf",
-            "source_bytes": 1, "bucket_staging": True,
-        })
-        record = {**record, "consumers": {"render": "done", "range": "not-needed"}}
-        self.assertTrue(reader_lifecycle.collectible(record))
+        self.assertEqual(record["phase"], "final")
+        self.assertEqual(record["consumers"], {})
 
     def test_orphan_marking_forgets_referenced_paths(self):
         marked = reader_lifecycle.mark_orphans(

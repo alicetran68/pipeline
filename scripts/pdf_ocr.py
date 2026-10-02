@@ -918,7 +918,7 @@ def validate_manifest(manifest: dict) -> dict:
 
 
 def source_records(search_data: Path, revisions: Path, assets_manifest: dict | None = None,
-                   repo: str = "", range_manifest: dict | None = None) -> list[dict]:
+                   repo: str = "") -> list[dict]:
     records = pdf_assets.load_records(search_data, revisions, repo, "pdf")
     if assets_manifest:
         generated = pdf_assets.load_generated_records(
@@ -926,9 +926,6 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
             min_bytes=0,
         )
         for item in generated:
-            # Structure-optimized PDFs are delivery artifacts in a separate
-            # Bucket. OCR the ordinary Reader-Assets PDF instead of downloading
-            # or reprocessing the range artifact.
             records.append(item)
     # A repaired/generated Reader PDF is authoritative for OCR. In particular,
     # never extract text from the original GBK-encoded 林一章版 PDF when its
@@ -945,13 +942,6 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
             by_key[key] = item
     records = list(by_key.values())
     records.sort(key=lambda item: (item.get("repo", ""), item.get("path", ""), item.get("source_kind", "")))
-    range_files = (range_manifest or {}).get("files", {})
-    for item in records:
-        range_entry = range_files.get(item["key"], {})
-        if isinstance(range_entry, dict) and range_entry.get("status") == "failed":
-            item["range_status"] = "failed"
-            item["range_reason"] = str(range_entry.get("reason") or "structure optimization failed")[:1000]
-            item["force_image_render"] = True
     return records
 
 

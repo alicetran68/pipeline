@@ -129,7 +129,6 @@ def main() -> int:
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--assets-manifest", type=Path)
     parser.add_argument("--ocr-manifest", type=Path)
-    parser.add_argument("--range-manifest", type=Path)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--repo", default="")
     parser.add_argument("--limit", type=int, required=True)
@@ -140,10 +139,7 @@ def main() -> int:
     assets = None
     if args.assets_manifest and args.assets_manifest.is_file():
         assets = json.loads(args.assets_manifest.read_text(encoding="utf-8"))
-    range_state = None
-    if args.range_manifest and args.range_manifest.is_file():
-        range_state = json.loads(args.range_manifest.read_text(encoding="utf-8"))
-    records = pdf_ocr.source_records(args.search_data, args.revisions, assets, args.repo, range_state)
+    records = pdf_ocr.source_records(args.search_data, args.revisions, assets, args.repo)
     current = None
     if args.ocr_manifest and args.ocr_manifest.is_file():
         current = json.loads(args.ocr_manifest.read_text(encoding="utf-8"))

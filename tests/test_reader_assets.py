@@ -33,7 +33,6 @@ class ReaderAssetContractTests(unittest.TestCase):
     def test_bucket_gc_can_use_existing_compact_sidecar_without_new_indexes(self):
         sidecar = gzip.compress(json.dumps({"v": 1, "f": {
             "live": {"s": 2, "p": "objects/live", "b": "vomebook/pdf-pages"},
-            "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},
         }}).encode())
         store = Mock()
         store.read_bytes.return_value = sidecar
@@ -78,14 +77,6 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml", references)
         self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz", references)
 
-    def test_bucket_gc_tracks_explicit_staging_bucket_paths(self):
-        sidecar = {"v": 1, "f": {
-            "optimized": {"s": 2, "p": "objects/optimized", "b": "vomebook/pdf-optimized"},
-        }}
-        references = set()
-        gc_reader_bucket.collect_bucket_paths(sidecar, "vomebook/pdf-optimized", references)
-        self.assertEqual(references, {"objects/optimized"})
-
     def test_bucket_gc_jxl_only_filters_candidates_without_touching_other_assets(self):
         store = Mock()
         store.list_files.side_effect = [
@@ -111,7 +102,6 @@ class ReaderAssetContractTests(unittest.TestCase):
             store, 0, 0, force_jxl_delete=True
         )
         self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/live.jxl"])
-        self.assertEqual(expired[reader_assets.READER_STAGING_BUCKET], [])
 
     def test_bucket_gc_can_use_separate_input_account_credentials(self):
         class FakeBoto3:
@@ -472,17 +462,16 @@ class ScannerTests(unittest.TestCase):
               ("txt", "text", "document.txt"), ("mht", "html", "document.html")],
         )
 
-    def test_bucket_migration_queues_pdf_to_dataset_when_staging_is_disabled(self):
+    def test_bucket_migration_queues_xlsx_as_a_page_stream(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Table", "Extension": "xlsx",
                   "Folder": [], "Size": 100}
         queue = scan_reader_assets.build_queue(
             [record], self.revisions, reader_assets.empty_manifest(),
-            bucket_migrate=True, bucket_pdf_staging=False,
+            bucket_migrate=True,
         )
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["reader_mode"], "pdf")
         self.assertTrue(queue[0]["page_stream"])
-        self.assertNotIn("bucket_staging", queue[0])
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
@@ -978,6 +967,47 @@ class ConverterTests(unittest.TestCase):
                 run.side_effect = fake_run
                 convert_reader_assets.convert_file({"extension": "xlsx"}, source, target, work)
             self.assertTrue(str(run.call_args.args[0][-1]).endswith("decrypted.xlsx"))
+
+    def test_encrypted_ole_xlsx_without_password_fails_before_libreoffice(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "page-manifest.json"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
+            office = Mock()
+            office.is_encrypted.return_value = True
+            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": ""}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
+                    patch.object(convert_reader_assets, "convert_spreadsheet_to_pages") as convert:
+                with self.assertRaisesRegex(RuntimeError, "encrypted spreadsheet requires"):
+                    convert_reader_assets.convert_file(
+                        {"extension": "xlsx", "output_name": "page-manifest.json"},
+                        source, target, work,
+                    )
+            convert.assert_not_called()
+
+    def test_encrypted_ole_xlsx_is_decrypted_before_spreadsheet_page_export(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.xlsx", work / "page-manifest.json"
+            source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
+            office = Mock()
+            office.is_encrypted.return_value = True
+
+            def decrypt(target_file):
+                target_file.write(b"clear workbook")
+
+            office.decrypt.side_effect = decrypt
+            with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
+                    patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
+                    patch.object(convert_reader_assets, "convert_spreadsheet_to_pages") as convert:
+                convert_reader_assets.convert_file(
+                    {"extension": "xlsx", "output_name": "page-manifest.json"},
+                    source, target, work, "a" * 64, "objects/aa/workbook/page-manifest.json",
+                )
+            decrypted = convert.call_args.args[0]
+            self.assertEqual(decrypted.name, "decrypted.xlsx")
+            self.assertEqual(decrypted.read_bytes(), b"clear workbook")
+            office.load_key.assert_called_once_with(password="secret")
 
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1597,6 +1627,55 @@ aW1hZ2U=
     def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
 
+    def test_spreadsheet_screenshot_keeps_full_natural_extent(self):
+        class FakePage:
+            def __init__(self):
+                self.viewport_sizes = []
+                self.screenshots = []
+
+            def goto(self, *_args, **_kwargs):
+                pass
+
+            def wait_for_function(self, *_args, **_kwargs):
+                pass
+
+            def evaluate(self, script, *_args):
+                if "scrollWidth" in script:
+                    return {"width": 4200, "height": 9800}
+                return None
+
+            def set_viewport_size(self, size):
+                self.viewport_sizes.append(size)
+
+            def wait_for_timeout(self, *_args):
+                pass
+
+            def screenshot(self, **kwargs):
+                self.screenshots.append(kwargs)
+
+        page = FakePage()
+        browser = Mock(new_page=Mock(return_value=page))
+        playwright = SimpleNamespace(chromium=SimpleNamespace(launch=Mock(return_value=browser)))
+
+        class PlaywrightContext:
+            def __enter__(self):
+                return playwright
+
+            def __exit__(self, *_args):
+                return False
+
+        module = SimpleNamespace(sync_playwright=PlaywrightContext)
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict("sys.modules", {"playwright": SimpleNamespace(), "playwright.sync_api": module}):
+            source = Path(root) / "sheet.html"
+            source.write_text("<html><body>table</body></html>", encoding="utf-8")
+            output = Path(root) / "screenshots"
+            output.mkdir()
+            result = convert_reader_assets.render_spreadsheet_html([source], output)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(page.viewport_sizes, [{"width": 4200, "height": 1600}])
+        self.assertEqual(page.screenshots, [{"path": str(output / "sheet-0001.png"), "full_page": True}])
+
     def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
         from PIL import Image
 
@@ -1636,7 +1715,7 @@ aW1hZ2U=
             rendered = work / "rendered"
             rendered.mkdir()
             screenshot = rendered / "sheet.png"
-            Image.new("RGB", (40, 40), "white").save(screenshot)
+            Image.new("RGB", (2400, 3200), "white").save(screenshot)
             target = work / "bundle/objects/aa/1234567890abcdef/page-manifest.json"
             item = {"profile": reader_assets.SPREADSHEET_PAGE_PROFILE}
             with patch.object(convert_reader_assets, "run_checked", side_effect=export_html) as run, \
@@ -1654,6 +1733,8 @@ aW1hZ2U=
             manifest = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(manifest["page_count"], 1)
             self.assertNotIn("pages", manifest)
+            with Image.open(target.parent / "pages" / "page-000001.webp") as page_image:
+                self.assertEqual(page_image.size, (2400, 3200))
 
     def test_mislabeled_ole_xlsx_uses_legacy_workbook_extension_for_html_render(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1906,12 +1987,11 @@ aW1hZ2U=
             self.assertTrue(result["reused"])
             self.assertEqual(result["sha256"], hashlib.sha256(artifact).hexdigest())
 
-    def test_pdf_staging_rehomes_a_reused_dataset_artifact(self):
+    def test_pdf_reuses_existing_dataset_artifact_path(self):
         item = {
             "key": "VoiceOfML/Test\0Moved.djvu", "extension": "djvu",
             "source_url": "https://example.test/moved.djvu", "source_revision": "rev2",
             "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
-            "bucket_staging": True,
         }
         digest = "a" * 64
         artifact = b"%PDF-reused"
@@ -1929,7 +2009,7 @@ aW1hZ2U=
                     patch.object(convert_reader_assets, "validate_reader_content"):
                 result = convert_reader_assets.convert_item(item, Path(root), reusable)
 
-        self.assertTrue(result["path"].startswith("staging/pdf/"))
+        self.assertEqual(result["path"], reusable[f"{digest}\0djvulibre-pdf-v1"]["path"])
         self.assertTrue(result["reused"])
 
     def test_concurrent_remote_reuse_marks_both_results_reused(self):
@@ -2041,10 +2121,6 @@ class PublicationTests(unittest.TestCase):
             publish_reader_assets, "remote_pdf_ocr_manifest", return_value={"version": 1, "files": {}})
         ocr_patcher.start()
         self.addCleanup(ocr_patcher.stop)
-        range_patcher = patch.object(
-            publish_reader_assets, "remote_state", return_value={"version": 1, "files": {}})
-        range_patcher.start()
-        self.addCleanup(range_patcher.stop)
 
     def make_bundle(self, root: str, result: dict) -> Path:
         bundle = Path(root)
@@ -2108,18 +2184,18 @@ class PublicationTests(unittest.TestCase):
             {"status": "ready", "reader_mode": "html", "path": "objects/bb/document.html"},
             {"status": "ready", "reader_mode": "foliate", "path": "objects/cc/document.epub"},
             {"status": "ready", "reader_mode": "audio", "path": "objects/dd/audio.mp3"},
+            {"status": "ready", "reader_mode": "pdf", "path": "objects/ee/document.pdf"},
         ]}
         self.assertEqual(publish_reader_assets.bucket_paths(data), [
             "objects/aa/document.docx", "objects/bb/document.html", "objects/cc/document.epub",
         ])
 
-    def test_spreadsheet_page_manifest_is_not_a_staging_pdf(self):
+    def test_spreadsheet_page_manifest_is_a_bucket_upload_candidate(self):
         data = {"results": [
             {"status": "ready", "reader_mode": "pdf", "path": "objects/aa/page-manifest.json",
              "page_stream": True},
-            {"status": "ready", "reader_mode": "pdf", "path": "staging/pdf/bb/document.pdf"},
         ]}
-        self.assertEqual(publish_reader_assets.staging_paths(data), ["staging/pdf/bb/document.pdf"])
+        self.assertEqual(publish_reader_assets.bucket_paths(data), ["objects/aa/page-manifest.json"])
 
     def test_bucket_chapter_artifacts_and_manifest_use_ebook_prefix(self):
         chapter_manifest = "objects/aa/epub-chapters/chapter-manifest.json"
@@ -2160,10 +2236,10 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(manifest["files"][data["results"][0]["key"]]["chapter_manifest"],
                          "ebook-chapters/objects/aa/epub-chapters/chapter-manifest.json")
 
-    def test_pdf_to_dataset_upload_commits_the_pdf_to_reader_assets(self):
+    def test_non_page_stream_pdf_upload_commits_to_reader_assets_dataset(self):
         result = {
             "key": "VoiceOfML/Test\0table.xlsx", "status": "ready",
-            "reader_mode": "pdf", "pdf_to_dataset": True, "path": "objects/aa/document.pdf",
+            "reader_mode": "pdf", "path": "objects/aa/document.pdf",
         }
         api = Mock()
         api.repo_info.return_value.sha = "parent"
@@ -2174,7 +2250,7 @@ class PublicationTests(unittest.TestCase):
             artifact.write_bytes(b"%PDF-table")
             publish_reader_assets.publish_dataset_pdf_artifacts(
                 api, "vomebook/Reader-Assets",
-                {"pdf_to_dataset": True, "results": [result]}, bundle,
+                {"results": [result]}, bundle,
             )
         api.create_commit.assert_called_once()
         operations = api.create_commit.call_args.kwargs["operations"]
@@ -2803,9 +2879,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("pip install -r scripts/requirements-spreadsheet-render.txt", workflow)
         self.assertIn("playwright install --with-deps chromium", workflow)
         self.assertIn("libreoffice-calc python3-uno", workflow)
-        staging_section = workflow.split("      bucket_pdf_staging:\n", 1)[1].split("      dry_run:\n", 1)[0]
-        self.assertIn("default: false", staging_section)
-        self.assertIn("pdf-optimized", staging_section)
+        self.assertNotIn("bucket_pdf_staging", workflow)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
         self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)

@@ -43,11 +43,6 @@ on:
         required: false
         default: true
         type: boolean
-      bucket_pdf_staging:
-        description: Explicitly stage PDF-producing formats in pdf-optimized for the paused PDF Range evaluation; enable only when that pipeline is active
-        required: false
-        default: false
-        type: boolean
       dry_run:
         description: Scan only; do not download, convert, or publish
         required: false
@@ -132,7 +127,6 @@ jobs:
           if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
           if [[ "${{ inputs.bucket_migrate }}" == "true" ]]; then args+=(--bucket-migrate); fi
-          if [[ "${{ inputs.bucket_pdf_staging }}" == "true" ]]; then args+=(--bucket-pdf-staging); fi
           retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
           python scripts/prepare_reader_assets_plan.py
       - name: Package conversion plan

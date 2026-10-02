@@ -54,7 +54,7 @@ def shard_for_key(key: str, shard_count: int) -> int:
 
 
 def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
-                  retry_failed=False, force=False, bucket_migrate=False, bucket_pdf_staging=False,
+                  retry_failed=False, force=False, bucket_migrate=False,
                   shard_count=1, shard_index=0) -> list[dict]:
     if shard_count < 1 or not 0 <= shard_index < shard_count:
         raise ValueError("invalid reader asset shard")
@@ -77,8 +77,6 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         if contract is None:
             continue
         spreadsheet_pages = contract[0] == SPREADSHEET_PAGE_PROFILE
-        pdf_to_dataset = (bucket_migrate and contract[1] == "pdf"
-                          and not bucket_pdf_staging and not spreadsheet_pages)
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
@@ -120,7 +118,8 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             )
             if not retryable_update and not missing_chapters:
                 continue
-        if (pdf_to_dataset and not force and existing.get("status") == "ready"
+        if (bucket_migrate and contract[1] == "pdf" and not spreadsheet_pages
+                and not force and existing.get("status") == "ready"
                 and existing.get("profile") == profile
                 and existing.get("bucket") in {None, ""}):
             continue
@@ -140,10 +139,6 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         if bucket_migrate and reader_mode == "pdf":
             if spreadsheet_pages:
                 item["page_stream"] = True
-            elif bucket_pdf_staging:
-                item["bucket_staging"] = True
-            else:
-                item["pdf_to_dataset"] = True
         selected.append(item)
     priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                   "doc": 3, "docx": 3, "htm": 3, "html": 3, "txt": 3, "md": 3, "markdown": 3,
@@ -208,7 +203,6 @@ def parse_args():
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--bucket-migrate", action="store_true")
-    parser.add_argument("--bucket-pdf-staging", action="store_true")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--manifest", type=Path)
@@ -231,7 +225,6 @@ def main() -> int:
     queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
                         limit=args.limit, retry_failed=args.retry_failed, force=args.force,
                          bucket_migrate=args.bucket_migrate,
-                         bucket_pdf_staging=args.bucket_pdf_staging,
                         shard_count=args.shard_count, shard_index=args.shard_index)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     current_keys = active_keys(records)
@@ -244,7 +237,6 @@ def main() -> int:
         "force_rebuild": bool(args.force),
         "authoritative_snapshot": not bool(args.repo or args.extension or args.path or args.bucket_migrate),
         "bucket_migration": bool(args.bucket_migrate),
-        "pdf_to_dataset": bool(args.bucket_migrate and not args.bucket_pdf_staging),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")
     return 0

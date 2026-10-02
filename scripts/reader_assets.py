@@ -12,7 +12,6 @@ MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
 READER_ASSETS_BUCKET = "vomebook/pdf-pages"
-READER_STAGING_BUCKET = "vomebook/pdf-optimized"
 MANIFEST_NAME = "manifest.json"
 # Chapter manifests make multi-file books cheap to open: the Reader fetches the
 # manifest and nearby chapters instead of downloading the complete archive.
@@ -20,7 +19,7 @@ MANIFEST_NAME = "manifest.json"
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v8-bucket"
-SPREADSHEET_PAGE_PROFILE = "libreoffice-html-pages-spreadsheet-v4"
+SPREADSHEET_PAGE_PROFILE = "libreoffice-html-pages-spreadsheet-v5"
 BUCKET_NATIVE_EXTENSIONS = {
     "txt": ("native-text-v1", "text", "document.txt"),
     "md": ("native-markdown-v1", "markdown", "document.md"),
@@ -244,8 +243,6 @@ def source_conversion_contract(repo: str, path: str, extension: str, source_byte
 def bucket_conversion_contract(repo: str, path: str, extension: str, source_bytes: int = 0):
     """Return the contract used when moving every static Reader format to the bucket."""
     if extension == "pdf":
-        # Every PDF is staged in pdf-pages until the page-stream pipeline
-        # consumes it. Structure optimization is retired.
         special = source_conversion_contract(repo, path, extension, source_bytes)
         if special:
             return special
