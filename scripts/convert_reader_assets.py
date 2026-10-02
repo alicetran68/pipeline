@@ -988,6 +988,8 @@ def convert_chm(source: Path, target: Path, work: Path) -> None:
             except ImportError:
                 from recover_chm import recover
             recover(source, target, source.stem)
+        if target.exists():
+            repair_chm_epub_images(source, target, work)
     validate_output(target, "epub")
     validate_chm_epub(target)
 
