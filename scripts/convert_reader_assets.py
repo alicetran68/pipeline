@@ -1406,9 +1406,18 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
                       if not any(spreadsheet_text_key(candidate) in visible_html
                                  for candidate in spreadsheet_text_variants(value))]
     if missing_values:
-        samples = [value[:160] for value in missing_values[:5]]
+        diagnostics = []
+        for value in missing_values[:8]:
+            key = spreadsheet_text_key(value)
+            probe_size = min(64, len(key))
+            diagnostics.append({
+                "chars": len(key),
+                "prefix_present": key[:probe_size] in visible_html,
+                "suffix_present": key[-probe_size:] in visible_html,
+            })
         raise RuntimeError(
-            f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s): {samples!r}"
+            f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s); "
+            f"text diagnostics: {diagnostics!r}"
         )
     exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
                           for page in html_pages)

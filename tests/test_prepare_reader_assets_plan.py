@@ -72,6 +72,24 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
             self.assertEqual(len(json.loads((root / "queue-0.json").read_text())["items"]), 2)
             self.assertEqual(len(json.loads((root / "queue-19.json").read_text())["items"]), 2)
 
+    def test_plan_matrix_contains_only_nonempty_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "queue.json"
+            output.write_text(json.dumps({
+                "items": [
+                    {"extension": "xls", "key": "first"},
+                    {"extension": "xls", "key": "second"},
+                ],
+                "bucket_migration": True,
+                "stale_keys": [],
+                "authoritative_snapshot": False,
+            }))
+            with patch.object(prepare_reader_assets_plan, "scan_reader_assets") as scanner:
+                scanner.shard_for_key.side_effect = lambda key, _count: 4 if key == "first" else 17
+                prepare_reader_assets_plan.prepare(output)
+            self.assertEqual(json.loads((root / "shards.json").read_text()), [4, 17])
+
 
 if __name__ == "__main__":
     unittest.main()
