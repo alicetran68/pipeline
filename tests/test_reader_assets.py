@@ -203,6 +203,10 @@ class ReaderAssetContractTests(unittest.TestCase):
             )},
         }
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
+        self.assertEqual(
+            reader_assets.bucket_conversion_contract("repo", "table.xlsx", "xlsx"),
+            (reader_assets.SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json"),
+        )
 
     def test_large_docx_keeps_native_contract(self):
         self.assertEqual(
@@ -1581,7 +1585,7 @@ aW1hZ2U=
             manifest = Path(root) / "page-manifest.json"
             manifest.write_text(json.dumps({
                 "version": 2, "kind": "pdf-pages", "source_sha256": "a" * 64,
-                "profile": "libreoffice-image-pages-xlsx-v1", "page_count": 3,
+                "profile": reader_assets.SPREADSHEET_PAGE_PROFILE, "page_count": 3,
             }), encoding="utf-8")
             convert_reader_assets.validate_page_manifest(manifest)
             manifest.write_text(json.dumps({
@@ -1589,6 +1593,68 @@ aW1hZ2U=
             }), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "page manifest is invalid"):
                 convert_reader_assets.validate_page_manifest(manifest)
+
+    def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
+        from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source = work / "sample.xlsx"
+            workbook = Workbook()
+            first = workbook.active
+            first.title = "Summary"
+            first.append(["Year", "Value"])
+            first.append([2024, 10])
+            chart = LineChart()
+            chart.add_data(Reference(first, min_col=2, min_row=1, max_row=2), titles_from_data=True)
+            chart.set_categories(Reference(first, min_col=1, min_row=2, max_row=2))
+            first.add_chart(chart, "D2")
+            second = workbook.create_sheet("Details")
+            second.append(["完整表格", "数据"])
+            workbook.save(source)
+            workbook.close()
+
+            output_dir = work / "spreadsheet-html"
+            def export_html(command, **_kwargs):
+                html_output = Path(command[command.index("--outdir") + 1])
+                html_output.mkdir(parents=True, exist_ok=True)
+                (html_output / "sample.html").write_text(
+                    '<a>Summary</a><a>Details</a><a href="sample_html_1.html">Summary</a>',
+                    encoding="utf-8",
+                )
+                (html_output / "sample_html_1.html").write_text(
+                    '<h1>Summary</h1><table><tr><td>Year</td><td>Value</td></tr>'
+                    '<tr><td>2024</td><td>10</td></tr></table><img src="chart.png">',
+                    encoding="utf-8",
+                )
+                (html_output / "sample_html_2.html").write_text(
+                    '<h1>Details</h1><table><tr><td>完整表格</td><td>数据</td></tr></table>',
+                    encoding="utf-8",
+                )
+
+            rendered = work / "rendered"
+            rendered.mkdir()
+            screenshot = rendered / "sheet.png"
+            Image.new("RGB", (40, 40), "white").save(screenshot)
+            target = work / "bundle/objects/aa/1234567890abcdef/page-manifest.json"
+            item = {"profile": reader_assets.SPREADSHEET_PAGE_PROFILE}
+            with patch.object(convert_reader_assets, "run_checked", side_effect=export_html) as run, \
+                    patch.object(convert_reader_assets, "validate_office_pdf") as validate_pdf, \
+                    patch.object(convert_reader_assets, "render_spreadsheet_html", return_value=[screenshot]):
+                convert_reader_assets.convert_spreadsheet_to_pages(
+                    source, target, work, item, "a" * 64, "objects/aa/" + "a" * 64
+                    + "/1234567890abcdef/page-manifest.json",
+                )
+
+            command = run.call_args.args[0]
+            self.assertIn("html:XHTML Calc File:UTF8", command)
+            self.assertNotIn("pdf", command[command.index("--convert-to") + 1].lower())
+            validate_pdf.assert_not_called()
+            manifest = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["page_count"], 1)
+            self.assertNotIn("pages", manifest)
 
     def test_epub_content_validation_rejects_missing_image_resources(self):
         with tempfile.TemporaryDirectory() as root:
@@ -2712,6 +2778,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("chm) packages=(calibre p7zip-full)", workflow)
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
+        self.assertIn("pip install -r scripts/requirements-spreadsheet-render.txt", workflow)
+        self.assertIn("playwright install --with-deps chromium", workflow)
         staging_section = workflow.split("      bucket_pdf_staging:\n", 1)[1].split("      dry_run:\n", 1)[0]
         self.assertIn("default: false", staging_section)
         self.assertIn("pdf-optimized", staging_section)

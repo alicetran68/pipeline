@@ -1383,41 +1383,130 @@ def validate_page_manifest(path: Path) -> None:
 
 def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: dict,
                                  source_sha256: str, object_path: str) -> None:
-    output = work / "spreadsheet-pdf"
+    output = work / "spreadsheet-html"
     output.mkdir()
-    pdf = output / "document.pdf"
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     run_checked([
         "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
-        "--convert-to", "pdf", "--outdir", str(output), str(source),
+        "--convert-to", "html:XHTML Calc File:UTF8", "--outdir", str(output), str(source),
     ])
-    produced = output / f"{source.stem}.pdf"
-    if not produced.is_file():
-        raise RuntimeError("LibreOffice produced no spreadsheet PDF")
-    if produced != pdf:
-        produced.rename(pdf)
-    validate_office_pdf(pdf, item, work, source)
-    rendered = work / "spreadsheet-pages"
+    main_html = output / f"{source.stem}.html"
+    if not main_html.is_file():
+        raise RuntimeError("LibreOffice produced no spreadsheet HTML")
+    exported_files = sorted(output.glob("*.html"))
+    if not exported_files:
+        raise RuntimeError("spreadsheet HTML export contains no worksheet pages")
+    html_pages = [path for path in exported_files if path != main_html] or [main_html]
+
+    expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(source)
+
+    exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in exported_files)
+    for sheet_name in expected_sheets:
+        if sheet_name not in html.unescape(exported_html):
+            raise RuntimeError(f"spreadsheet HTML export omitted worksheet: {sheet_name}")
+    missing_values = [value for value in expected_values if value not in html.unescape(exported_html)]
+    if missing_values:
+        raise RuntimeError(f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s)")
+    exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
+                          for page in html_pages)
+    if exported_images < expected_charts + expected_images:
+        raise RuntimeError("spreadsheet HTML export omitted chart or image objects")
+
+    rendered = work / "spreadsheet-rendered"
     rendered.mkdir()
-    run_checked(["pdftoppm", "-png", "-r", "150", str(pdf), str(rendered / "page")])
-    images = sorted(rendered.glob("page-*.png"), key=lambda value: int(value.stem.rsplit("-", 1)[-1]))
-    if not images:
-        raise RuntimeError("spreadsheet PDF produced no pages")
+    screenshots = render_spreadsheet_html(html_pages, rendered)
     page_root = target.parent / "pages"
     page_root.mkdir(parents=True, exist_ok=True)
     page_count = 0
-    for number, image_path in enumerate(images, 1):
+    for number, image_path in enumerate(screenshots, 1):
         destination = page_root / f"page-{number:06d}.webp"
         with Image.open(image_path) as image:
             image = image.convert("RGB")
             image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             image.save(destination, "WEBP", method=6, quality=85)
-        data = destination.read_bytes()
         page_count = number
     target.write_bytes(canonical_json({
         "version": 2, "kind": "pdf-pages", "source_sha256": source_sha256,
         "profile": item["profile"], "page_count": page_count,
     }, pretty=True))
+
+
+def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("spreadsheet image rendering requires Playwright") from exc
+    screenshots = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            page = browser.new_page(viewport={"width": 1800, "height": 1600}, device_scale_factor=1)
+            for sheet_number, source in enumerate(html_pages, 1):
+                page.goto(source.resolve().as_uri(), wait_until="load", timeout=120000)
+                page.wait_for_function(
+                    "() => [...document.images].every(image => image.complete && image.naturalWidth > 0)",
+                    timeout=60000,
+                )
+                page.evaluate("""() => document.fonts?.ready.then(() => true)""")
+                dimensions = page.evaluate("""() => ({
+                  width: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+                  height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
+                })""")
+                if dimensions["width"] < 2 or dimensions["height"] < 2:
+                    raise RuntimeError(f"spreadsheet worksheet {sheet_number} rendered blank")
+                rows = (dimensions["height"] + 1559) // 1560
+                columns = (dimensions["width"] + 1759) // 1760
+                for row in range(rows):
+                    for column in range(columns):
+                        page.evaluate("""({x, y}) => window.scrollTo(x, y)""", {
+                            "x": column * 1760, "y": row * 1560,
+                        })
+                        page.wait_for_timeout(80)
+                        target = output / f"sheet-{sheet_number:04d}-tile-{row:04d}-{column:04d}.png"
+                        page.screenshot(path=str(target))
+                        screenshots.append(target)
+            return screenshots
+        finally:
+            browser.close()
+
+
+def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], int, int]:
+    import openpyxl
+
+    try:
+        workbook = openpyxl.load_workbook(source, read_only=False, data_only=False)
+    except (openpyxl.utils.exceptions.InvalidFileException, zipfile.BadZipFile):
+        try:
+            import xlrd
+            legacy = xlrd.open_workbook(str(source), on_demand=True)
+        except Exception as exc:
+            raise RuntimeError("spreadsheet workbook structure is unreadable") from exc
+        sheets, values = [], []
+        try:
+            for sheet in legacy.sheets():
+                sheets.append(sheet.name)
+                for row in range(sheet.nrows):
+                    for column in range(sheet.ncols):
+                        value = sheet.cell_value(row, column)
+                        if isinstance(value, str) and value.strip():
+                            values.append(value.strip())
+        finally:
+            legacy.release_resources()
+        return sheets, values, 0, 0
+    try:
+        sheets, values, charts, images = [], [], 0, 0
+        for sheet in workbook.worksheets:
+            sheets.append(sheet.title)
+            charts += len(sheet._charts)
+            images += len(sheet._images)
+            for row in sheet.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.strip() and not value.startswith("="):
+                        values.append(value.strip())
+        return sheets, values, charts, images
+    finally:
+        workbook.close()
 
 
 class _ImageSources(HTMLParser):
@@ -1428,6 +1517,12 @@ class _ImageSources(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "img":
             self.sources.append(dict(attrs).get("src", "").strip())
+
+
+def image_sources(document: str) -> list[str]:
+    parser = _ImageSources()
+    parser.feed(document)
+    return parser.sources
 
 
 def validate_mhtml_content(path: Path) -> None:
@@ -1793,7 +1888,9 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             source_revision=item["source_revision"], key=item["key"],
         )
         if item.get("output_name") == "page-manifest.json":
-            profile_path = hashlib.sha256(item["key"].encode("utf-8")).hexdigest()[:16]
+            profile_path = hashlib.sha256(
+                f"{item['key']}\0{item['profile']}".encode("utf-8")
+            ).hexdigest()[:16]
         reusable_path = existing.get("path") if existing else None
         can_reuse_path = bool(reusable_path) and (
             not item.get("bucket_staging") or reusable_path.startswith("staging/pdf/")

@@ -20,7 +20,7 @@ MANIFEST_NAME = "manifest.json"
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v8-bucket"
-SPREADSHEET_PAGE_PROFILE = "libreoffice-image-pages-xlsx-v1"
+SPREADSHEET_PAGE_PROFILE = "libreoffice-html-pages-xlsx-v2"
 BUCKET_NATIVE_EXTENSIONS = {
     "txt": ("native-text-v1", "text", "document.txt"),
     "md": ("native-markdown-v1", "markdown", "document.md"),

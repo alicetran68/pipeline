@@ -199,6 +199,10 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${packages[@]}"
           fi
+          if [[ "${EXTENSION}" == "xls" || "${EXTENSION}" == "xlsx" ]]; then
+            pip install -r scripts/requirements-spreadsheet-render.txt
+            python -m playwright install --with-deps chromium
+          fi
           if [[ "${EXTENSION}" == "caj" || "${EXTENSION}" == "kdh" ]]; then
             sudo git clone --filter=blob:none --no-checkout https://github.com/caj2pdf/caj2pdf.git /opt/caj2pdf
             sudo git -C /opt/caj2pdf checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368
