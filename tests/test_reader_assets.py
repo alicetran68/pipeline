@@ -1576,6 +1576,20 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "no readable content"):
                 convert_reader_assets.validate_html_content(html_file)
 
+    def test_spreadsheet_page_manifest_uses_the_reader_compact_schema(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "page-manifest.json"
+            manifest.write_text(json.dumps({
+                "version": 2, "kind": "pdf-pages", "source_sha256": "a" * 64,
+                "profile": "libreoffice-image-pages-xlsx-v1", "page_count": 3,
+            }), encoding="utf-8")
+            convert_reader_assets.validate_page_manifest(manifest)
+            manifest.write_text(json.dumps({
+                "version": 2, "kind": "pdf-pages", "page_count": 3, "pages": [],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "page manifest is invalid"):
+                convert_reader_assets.validate_page_manifest(manifest)
+
     def test_epub_content_validation_rejects_missing_image_resources(self):
         with tempfile.TemporaryDirectory() as root:
             epub = Path(root) / "missing-image.epub"

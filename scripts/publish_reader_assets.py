@@ -94,8 +94,10 @@ def bucket_paths(data: dict, bundle: Path | None = None) -> list[str]:
             if result.get("page_stream") and bundle is not None:
                 root = (bundle / Path(result["path"]).parent / "pages")
                 if root.is_dir():
-                    paths.update((Path(result["path"]).parent / "pages" / item.name).as_posix()
-                                 for item in root.iterdir() if item.is_file())
+                    count = int(result.get("page_count") or 0)
+                    paths.update((Path(result["path"]).parent / "pages"
+                                  / f"page-{number:06d}.webp").as_posix()
+                                 for number in range(1, count + 1))
         if result.get("chapter_manifest"):
             if bundle is not None:
                 local_manifest = local_chapter_path(result["chapter_manifest"])
@@ -184,7 +186,11 @@ def artifact_files(data: dict, roots: dict[str, Path], bundle: Path | None = Non
             page_root = root / Path(path).parent / "pages"
             if not page_root.is_dir():
                 raise ValueError(f"missing spreadsheet page stream for {result['key']}")
-            for child in sorted(page_root.glob("*.webp")):
+            count = int(result.get("page_count") or 0)
+            for number in range(1, count + 1):
+                child = page_root / f"page-{number:06d}.webp"
+                if not child.is_file():
+                    raise ValueError(f"spreadsheet page {number} is missing for {result['key']}")
                 remote = (Path(path).parent / "pages" / child.name).as_posix()
                 artifacts[remote] = (root, str(child))
         if result.get("chapter_manifest"):

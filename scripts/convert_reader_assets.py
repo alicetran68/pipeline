@@ -1375,17 +1375,10 @@ def validate_page_manifest(path: Path) -> None:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError("converted page manifest is invalid") from exc
-    pages = manifest.get("pages") if isinstance(manifest, dict) else None
+    page_count = manifest.get("page_count") if isinstance(manifest, dict) else None
     if (manifest.get("version") != 2 or manifest.get("kind") != "pdf-pages"
-            or not isinstance(pages, list) or not pages):
+            or type(page_count) is not int or page_count < 1 or "pages" in manifest):
         raise RuntimeError("converted page manifest is invalid")
-    for number, page in enumerate(pages, 1):
-        if (not isinstance(page, dict) or page.get("page") != number
-                or not isinstance(page.get("path"), str)
-                or not page["path"].endswith(f"/pages/page-{number:06d}.webp")
-                or not isinstance(page.get("bytes"), int) or page["bytes"] <= 0
-                or not re.fullmatch(r"[0-9a-f]{64}", str(page.get("sha256", "")))):
-            raise RuntimeError("converted page manifest is invalid")
 
 
 def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: dict,
@@ -1412,7 +1405,7 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
         raise RuntimeError("spreadsheet PDF produced no pages")
     page_root = target.parent / "pages"
     page_root.mkdir(parents=True, exist_ok=True)
-    pages = []
+    page_count = 0
     for number, image_path in enumerate(images, 1):
         destination = page_root / f"page-{number:06d}.webp"
         with Image.open(image_path) as image:
@@ -1420,15 +1413,10 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
             image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
             image.save(destination, "WEBP", method=6, quality=85)
         data = destination.read_bytes()
-        pages.append({
-            "page": number,
-            "path": f"{posixpath.dirname(object_path)}/pages/page-{number:06d}.webp",
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-        })
+        page_count = number
     target.write_bytes(canonical_json({
         "version": 2, "kind": "pdf-pages", "source_sha256": source_sha256,
-        "profile": item["profile"], "page_count": len(pages), "pages": pages,
+        "profile": item["profile"], "page_count": page_count,
     }, pretty=True))
 
 
@@ -1926,6 +1914,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             result["fallback_path"] = object_path
         if item.get("output_name") == "page-manifest.json":
             result["page_stream"] = True
+            result["page_count"] = json.loads(target.read_text(encoding="utf-8"))["page_count"]
         if chapter_manifest_path:
             result["chapter_manifest"] = chapter_manifest_path
             result["chapter_bundle_profile"] = EPUB_CHAPTER_PROFILE
