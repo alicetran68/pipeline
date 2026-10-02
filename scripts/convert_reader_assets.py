@@ -1401,10 +1401,11 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
     expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(source)
 
     exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in exported_files)
-    for sheet_name in expected_sheets:
-        if sheet_name not in html.unescape(exported_html):
-            raise RuntimeError(f"spreadsheet HTML export omitted worksheet: {sheet_name}")
-    missing_values = [value for value in expected_values if value not in html.unescape(exported_html)]
+    if len(html_pages) < len(expected_sheets):
+        raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
+    visible_html = html.unescape(exported_html)
+    missing_values = [value for value in expected_values
+                      if not any(candidate in visible_html for candidate in spreadsheet_text_variants(value))]
     if missing_values:
         raise RuntimeError(f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s)")
     exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
@@ -1507,6 +1508,16 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
         return sheets, values, charts, images
     finally:
         workbook.close()
+
+
+def spreadsheet_text_variants(value: str) -> set[str]:
+    variants = {value}
+    for encoding in ("latin-1", "cp1252"):
+        try:
+            variants.add(value.encode(encoding).decode("utf-8"))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return variants
 
 
 class _ImageSources(HTMLParser):

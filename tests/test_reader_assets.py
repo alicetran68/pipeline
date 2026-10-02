@@ -1594,6 +1594,9 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "page manifest is invalid"):
                 convert_reader_assets.validate_page_manifest(manifest)
 
+    def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
+        self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
+
     def test_xlsx_page_stream_exports_html_without_pdf_conversion(self):
         from openpyxl import Workbook
         from openpyxl.chart import LineChart, Reference
