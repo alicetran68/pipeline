@@ -26,6 +26,47 @@ from scripts import epub_chapters, reader_assets, render_spreadsheet_html, scan_
 
 
 class ReaderAssetContractTests(unittest.TestCase):
+    def test_bucket_head_inventory_treats_only_not_found_as_missing(self):
+        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
+        store._location = Mock(return_value=("vomebook", "pdf-pages"))
+        client = Mock()
+
+        class MissingObject(Exception):
+            response = {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}
+
+        def head_object(*, Key, **_kwargs):
+            if Key == "objects/missing":
+                raise MissingObject()
+
+        client.head_object.side_effect = head_object
+        store._client = Mock(return_value=client)
+        store._list_workers = 2
+        store._verify_workers = 2
+        self.assertEqual(store.existing_files(
+            reader_assets.READER_ASSETS_BUCKET, {"objects/present", "objects/missing"},
+        ), {"objects/present"})
+
+    def test_bucket_integrity_scan_expands_page_and_chapter_manifests(self):
+        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
+        store._manifest_workers = 2
+        manifests = {
+            "objects/a/page-manifest.json": {"page_count": 2},
+            "ebook-chapters/objects/b/chapter-manifest.json": {
+                "chapters": [{"path": "chapters/chapter-0001.xhtml"}],
+                "search_index": {"path": "epub-search-index.json.gz"},
+            },
+        }
+        store.read_bytes = Mock(side_effect=lambda _bucket, path: json.dumps(manifests[path]).encode())
+        self.assertEqual(store.manifest_references(reader_assets.READER_ASSETS_BUCKET, set(manifests)), {
+            "objects/a/page-manifest.json": {
+                "objects/a/pages/page-000001.webp", "objects/a/pages/page-000002.webp",
+            },
+            "ebook-chapters/objects/b/chapter-manifest.json": {
+                "ebook-chapters/objects/b/chapters/chapter-0001.xhtml",
+                "ebook-chapters/objects/b/epub-search-index.json.gz",
+            },
+        })
+
     def test_bucket_gc_zero_limit_means_unlimited(self):
         self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 0), ["a", "b", "c"])
         self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 2), ["a", "b"])
@@ -142,10 +183,10 @@ class ReaderAssetContractTests(unittest.TestCase):
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
             {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
-             "ape", "wma", "amr", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
-             "mpeg", "mts", "ts", "wmv"},
+             "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
+             "mpeg", "mts", "ts", "wmv", "mov", "mp4"},
         )
-        for extension in ("pdg", "swf", "asx", "dat", "mp3", "mp4", "wav", "m4a", "flac", "mov", "mpga"):
+        for extension in ("pdg", "swf", "asx", "dat", "mp3"):
             self.assertNotIn(extension, reader_assets.CONVERTIBLE_EXTENSIONS)
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -197,6 +238,16 @@ class ReaderAssetContractTests(unittest.TestCase):
             reader_assets.bucket_conversion_contract("repo", "table.xlsx", "xlsx"),
             (reader_assets.SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json"),
         )
+        for extension, mode, output in (
+            ("mp3", "audio", "audio.mp3"), ("wav", "audio", "audio.wav"),
+            ("m4a", "audio", "audio.m4a"), ("flac", "audio", "audio.flac"),
+            ("mpga", "audio", "audio.mpga"), ("mp4", "video", "video.mp4"),
+            ("mov", "video", "video.mov"),
+        ):
+            self.assertEqual(
+                reader_assets.bucket_conversion_contract("repo", f"media.{extension}", extension),
+                (reader_assets.NATIVE_MEDIA_PROFILE, mode, output),
+            )
         for extension in ("xls", "xlsx", "csv", "ods"):
             self.assertEqual(
                 reader_assets.bucket_conversion_contract("repo", f"table.{extension}", extension),
@@ -489,6 +540,21 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["output_name"], "page-manifest.json")
         self.assertTrue(queue[0]["page_stream"])
 
+    def test_bucket_migration_queues_native_media_without_adding_source_conversion(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "concert", "Extension": "mp4",
+                  "Folder": [], "Size": 100}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
+        )
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["profile"], reader_assets.NATIVE_MEDIA_PROFILE)
+        self.assertEqual(queue[0]["output_name"], "video.mp4")
+        self.assertIsNone(reader_assets.source_conversion_contract(record["Repo"], "concert.mp4", "mp4"))
+        self.assertIn(
+            reader_assets.asset_key(record["Repo"], "concert.mp4"),
+            scan_reader_assets.active_keys([record], bucket_migrate=True),
+        )
+
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
@@ -497,6 +563,61 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(scan_reader_assets.build_queue(
             self.records[:1], self.revisions, manifest, bucket_migrate=True,
         ), [])
+
+    def test_bucket_migration_requeues_ready_mapping_when_bucket_object_is_missing(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "docx-native-v2",
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
+            "path": "objects/missing/document.docx",
+        }}}
+        queue = scan_reader_assets.build_queue(
+            self.records[:1], self.revisions, manifest, bucket_migrate=True,
+            bucket_objects={"objects/other/document.docx"},
+        )
+        self.assertEqual([item["key"] for item in queue], [key])
+
+    def test_bucket_migration_skips_ready_mapping_when_bucket_object_exists(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "docx-native-v2",
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
+            "path": "objects/present/document.docx",
+        }}}
+        self.assertEqual(scan_reader_assets.build_queue(
+            self.records[:1], self.revisions, manifest, bucket_migrate=True,
+            bucket_objects={"objects/present/document.docx"},
+        ), [])
+
+    def test_bucket_migration_requeues_missing_chapter_manifest(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "epub",
+                  "Folder": [], "Size": 100}
+        key = reader_assets.asset_key(record["Repo"], "Book.epub")
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": "foliate-original-v1", "reader_mode": "foliate",
+            "bucket": reader_assets.READER_ASSETS_BUCKET,
+            "path": "objects/present/document.epub",
+            "chapter_manifest": "ebook-chapters/objects/missing/chapter-manifest.json",
+            "chapter_bucket": reader_assets.READER_ASSETS_BUCKET,
+        }}}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, manifest, bucket_migrate=True,
+            bucket_objects={"objects/present/document.epub"},
+        )
+        self.assertEqual([item["key"] for item in queue], [key])
+
+    def test_bucket_paths_to_check_only_selects_current_ready_bucket_mappings(self):
+        key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
+        stale_key = reader_assets.asset_key("VoiceOfML/Test", "Deleted.docx")
+        manifest = {"version": 1, "files": {
+            key: {"status": "ready", "bucket": reader_assets.READER_ASSETS_BUCKET,
+                  "path": "objects/a/document.docx"},
+            stale_key: {"status": "ready", "bucket": reader_assets.READER_ASSETS_BUCKET,
+                       "path": "objects/stale/document.docx"},
+        }}
+        self.assertEqual(scan_reader_assets.bucket_paths_to_check(
+            self.records[:1], manifest,
+        ), {"objects/a/document.docx"})
 
     def test_bucket_migration_force_requeues_an_asset_already_marked_in_bucket(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
@@ -835,6 +956,46 @@ class ConverterTests(unittest.TestCase):
             self.assertIn("0:a:0", command)
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
 
+    def test_native_audio_keeps_compatible_source_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.flac", work / "audio.flac"
+            source.write_bytes(b"lossless source")
+            with patch.object(convert_reader_assets, "run_checked") as run:
+                convert_reader_assets.convert_file(
+                    {"extension": "flac", "profile": reader_assets.NATIVE_MEDIA_PROFILE},
+                    source, target, work,
+                )
+            run.assert_not_called()
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+
+    def test_native_mp4_with_unsupported_codec_selects_transcode_profile(self):
+        probe = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p"},
+                {"codec_type": "audio", "codec_name": "aac"},
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        }
+        item = {"extension": "mp4", "reader_mode": "video", "profile": reader_assets.NATIVE_MEDIA_PROFILE,
+                "output_name": "video.mp4"}
+        with tempfile.TemporaryDirectory() as root, patch.object(convert_reader_assets, "media_probe", return_value=probe):
+            converted = convert_reader_assets.prepare_native_media_item(item, Path(root) / "source.mp4")
+        self.assertEqual(converted["profile"], "ffmpeg-video-mp4-h264-aac-v1")
+        self.assertEqual(converted["output_name"], "video.mp4")
+        self.assertTrue(converted["transcode_media"])
+
+    def test_native_h264_mp4_preserves_bytes_without_transcoding(self):
+        probe = {
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 1280, "height": 720},
+                {"codec_type": "audio", "codec_name": "aac"},
+            ],
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        }
+        with tempfile.TemporaryDirectory() as root, patch.object(convert_reader_assets, "media_probe", return_value=probe):
+            self.assertTrue(convert_reader_assets.browser_native_media(Path("source.mp4"), "mp4", "video"))
+
     def test_video_conversion_uses_h264_aac_faststart_contract(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
@@ -846,6 +1007,7 @@ class ConverterTests(unittest.TestCase):
             for value in ("libx264", "yuv420p", "aac", "+faststart", "0:v:0", "0:a:0?"):
                 self.assertIn(value, command)
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
+
 
     def test_audio_only_rm_uses_black_video_and_aac_audio(self):
         with tempfile.TemporaryDirectory() as root:
@@ -874,6 +1036,26 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(target.read_bytes()[:4], b"RIFF")
             with convert_reader_assets.Image.open(target) as image:
                 self.assertEqual(image.format, "WEBP")
+
+    def test_image_conversion_downscales_webp_unsupported_edge(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.png", work / "document.webp"
+            convert_reader_assets.Image.new("RGB", (16_384, 1), "white").save(source)
+            convert_reader_assets.convert_reader_image(source, target)
+            with convert_reader_assets.Image.open(target) as image:
+                self.assertEqual(image.format, "WEBP")
+                self.assertLessEqual(max(image.size), convert_reader_assets.MAX_READER_IMAGE_EDGE)
+
+    def test_large_image_conversion_restores_pillow_pixel_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "source.png", work / "document.webp"
+            convert_reader_assets.Image.new("RGB", (4, 4), "white").save(source)
+            with patch.object(convert_reader_assets.Image, "MAX_IMAGE_PIXELS", 10):
+                convert_reader_assets.convert_reader_image(source, target)
+                self.assertEqual(convert_reader_assets.Image.MAX_IMAGE_PIXELS, 10)
+            self.assertTrue(target.is_file())
 
     def test_calibre_office_book_conversion_uses_html_output(self):
         with tempfile.TemporaryDirectory() as root:
@@ -2141,7 +2323,38 @@ aW1hZ2U=
             conversion.assert_not_called()
             reused.assert_called_once()
             self.assertTrue(result["reused"])
-            self.assertEqual(result["sha256"], hashlib.sha256(artifact).hexdigest())
+        self.assertEqual(result["sha256"], hashlib.sha256(artifact).hexdigest())
+
+    def test_missing_remote_reusable_artifact_falls_back_to_conversion(self):
+        item = {
+            "key": "VoiceOfML/Test\0Missing.djvu", "extension": "djvu",
+            "source_url": "https://example.test/missing.djvu", "source_revision": "rev1",
+            "profile": "djvulibre-pdf-v1", "reader_mode": "pdf", "output_name": "document.pdf",
+        }
+        digest = "a" * 64
+        reusable = {f"{digest}\0djvulibre-pdf-v1": {
+            "path": f"objects/aa/{digest}/djvulibre-pdf-v1/document.pdf",
+            "bytes": 12, "sha256": "b" * 64,
+        }}
+        with tempfile.TemporaryDirectory() as root:
+            def download(_url, target):
+                target.write_bytes(b"source")
+                return digest, 6
+
+            def missing(_url, _target, _digest):
+                raise urllib.error.HTTPError(_url, 404, "missing", {}, None)
+
+            def convert(_item, _source, target, _work):
+                target.write_bytes(b"%PDF-rebuilt")
+
+            with patch.object(convert_reader_assets, "download_source", side_effect=download), \
+                    patch.object(convert_reader_assets, "download_existing", side_effect=missing), \
+                    patch.object(convert_reader_assets, "convert_file", side_effect=convert), \
+                    patch.object(convert_reader_assets, "validate_djvu_pdf"), \
+                    patch.object(convert_reader_assets, "validate_reader_content"):
+                result = convert_reader_assets.convert_item(item, Path(root), reusable)
+        self.assertFalse(result["reused"])
+        self.assertEqual(result["path"], reusable[f"{digest}\0djvulibre-pdf-v1"]["path"])
 
     def test_pdf_reuses_existing_dataset_artifact_path(self):
         item = {
@@ -3005,6 +3218,8 @@ class PruneTests(unittest.TestCase):
 class WorkflowContractTests(unittest.TestCase):
     def test_workflow_exposes_incremental_controls_and_excludes_pdg(self):
         workflow = Path(".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
+        self.assertIn('cron: "23 3 * * 0"', workflow)
+        self.assertIn("inputs.bucket_migrate || 'true'", workflow)
         for field in ("repo:", "extension:", "limit:", "checkpoint_batches:", "retry_failed:", "force:", "dry_run:"):
             self.assertIn(field, workflow)
         self.assertNotIn("pdg", workflow.lower())
@@ -3041,7 +3256,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)
         self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
-        self.assertIn("ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
+        self.assertIn("ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn("needs.plan.outputs.count != '0'", workflow)

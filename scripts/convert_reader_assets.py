@@ -23,6 +23,7 @@ import http.client
 import urllib.error
 import urllib.request
 import urllib.parse
+import warnings
 import zipfile
 import os
 import posixpath
@@ -40,12 +41,14 @@ from PIL import Image, ImageSequence
 
 try:
     from .reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE,
+        PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
 except ImportError:
     from reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE,
+        PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
 
@@ -55,6 +58,9 @@ except ImportError:
     import shared
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_READER_IMAGE_PIXELS = 300_000_000
+MAX_READER_IMAGE_EDGE = 16_000
+READER_IMAGE_LOCK = threading.Lock()
 MAX_HTML_RESOURCE_BYTES = 16 * 1024 * 1024
 MAX_HTML_RESOURCE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_HTML_RESOURCES = 64
@@ -432,6 +438,22 @@ def download_existing(url: str, target: Path, expected_sha256: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def is_remote_not_found(error: Exception) -> bool:
+    """Whether a reusable dataset object disappeared and can be rebuilt."""
+    status = getattr(error, "code", None)
+    response = getattr(error, "response", None)
+    if status in {404, 410, "404", "410"}:
+        return True
+    if isinstance(response, dict):
+        if response.get("status_code") in {404, 410}:
+            return True
+        if response.get("Error", {}).get("Code") in {"404", "410", "NotFound", "NoSuchKey"}:
+            return True
+        if response.get("ResponseMetadata", {}).get("HTTPStatusCode") in {404, 410}:
+            return True
+    return False
+
+
 def file_sha256(path: Path) -> str:
     return shared.hash_file(path)[0]
 
@@ -542,6 +564,70 @@ def validate_media_output(path: Path, reader_mode: str) -> None:
             or not 0 < width <= 1920 or not 0 < height <= 1080
             or (audio and audio[0].get("codec_name") != "aac")):
         raise RuntimeError("conversion output is not compatible H.264/AAC video")
+
+
+def browser_native_media(path: Path, extension: str, reader_mode: str) -> bool:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    media_format = probe.get("format") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not isinstance(media_format, dict):
+        raise RuntimeError("source media has no stream metadata")
+    format_names = set(str(media_format.get("format_name") or "").split(","))
+    audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    video = [stream for stream in streams if stream.get("codec_type") == "video"
+             and not stream.get("disposition", {}).get("attached_pic")]
+    if reader_mode == "audio":
+        if not audio or video:
+            raise RuntimeError("native audio asset has invalid streams")
+        codec = str(audio[0].get("codec_name") or "")
+        if extension in {"mp3", "mpga"}:
+            return codec == "mp3"
+        if extension == "wav":
+            return "wav" in format_names and codec.startswith("pcm_")
+        if extension == "flac":
+            return codec == "flac"
+        if extension == "m4a":
+            return codec == "aac"
+        return False
+    if reader_mode != "video" or len(video) != 1 or len(audio) > 1:
+        raise RuntimeError("native video asset has invalid streams")
+    return (video[0].get("codec_name") == "h264" and video[0].get("pix_fmt") == "yuv420p"
+            and (not audio or audio[0].get("codec_name") == "aac")
+            and bool(format_names.intersection({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})))
+
+
+def prepare_native_media_item(item: dict, source: Path) -> dict:
+    if item.get("profile") != NATIVE_MEDIA_PROFILE:
+        return item
+    if browser_native_media(source, item["extension"], item["reader_mode"]):
+        return item
+    prepared = dict(item)
+    if item["reader_mode"] == "audio":
+        prepared.update(profile="ffmpeg-audio-mp3-v1", output_name="audio.mp3", transcode_media=True)
+    else:
+        prepared.update(profile="ffmpeg-video-mp4-h264-aac-v1", output_name="video.mp4", transcode_media=True)
+    return prepared
+
+
+def validate_native_media_output(path: Path, reader_mode: str) -> None:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    media_format = probe.get("format") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not isinstance(media_format, dict):
+        raise RuntimeError("native media output has no stream metadata")
+    try:
+        duration = float(media_format.get("duration") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("native media output has invalid duration") from exc
+    if not 0 < duration <= 24 * 60 * 60:
+        raise RuntimeError("native media output duration is outside limits")
+    audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    video = [stream for stream in streams if stream.get("codec_type") == "video"
+             and not stream.get("disposition", {}).get("attached_pic")]
+    if reader_mode == "audio" and (not audio or video):
+        raise RuntimeError("native audio output has invalid streams")
+    if reader_mode == "video" and (len(video) != 1 or len(audio) > 1):
+        raise RuntimeError("native video output has invalid streams")
 
 
 def embedded_pdf_fonts(path: Path) -> list[str]:
@@ -1776,9 +1862,46 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
         raise RuntimeError("original Foliate asset is empty")
 
 
+def convert_reader_image(source: Path, target: Path) -> None:
+    with READER_IMAGE_LOCK:
+        max_pixels = Image.MAX_IMAGE_PIXELS
+        try:
+            Image.MAX_IMAGE_PIXELS = MAX_READER_IMAGE_PIXELS
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(source) as image:
+                    image.seek(0)
+                    image.thumbnail(
+                        (MAX_READER_IMAGE_EDGE, MAX_READER_IMAGE_EDGE), Image.Resampling.LANCZOS,
+                    )
+                    image.convert("RGB").save(target, "WEBP", method=6, quality=88)
+        finally:
+            Image.MAX_IMAGE_PIXELS = max_pixels
+
+
 def convert_file(item: dict, source: Path, target: Path, work: Path,
                  source_sha256: str = "", object_path: str = "") -> None:
     ext = item["extension"]
+    if item.get("profile") == NATIVE_MEDIA_PROFILE:
+        shutil.copyfile(source, target)
+        return
+    if item.get("transcode_media"):
+        if item["reader_mode"] == "audio":
+            run_checked([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
+                "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
+            ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+        else:
+            run_checked([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+                "-map_metadata", "-1", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", str(target),
+            ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+        return
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     explicit_password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
     password = explicit_password
@@ -1870,9 +1993,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         # Keep the source repository untouched, but serve one CDN-friendly
         # image format from the shared Reader bucket.
         if item.get("reader_mode") == "image" and item.get("output_name", "").endswith(".webp"):
-            image = Image.open(source)
-            image.seek(0)
-            image.convert("RGB").save(target, "WEBP", method=6, quality=88)
+            convert_reader_image(source, target)
         else:
             shutil.copyfile(source, target)
     elif ext == "pdf" and item.get("profile") == "native-pdf-v1":
@@ -1958,13 +2079,13 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"caj", "kdh"}:
         convert_caj_family(source, target, work)
-    elif ext in {"ape", "wma", "amr"}:
+    elif ext in {"ape", "wma", "amr", "flac", "m4a", "mpga", "wav"}:
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
             "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
         ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
-    elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv"}:
+    elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv", "mov", "mp4"}:
         if ext in {"rm", "rmvb"} and item.get("source_media_mode") == "audio":
             run_checked([
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
@@ -2002,7 +2123,7 @@ def normalized_office_pdf(source: Path, work: Path) -> Path:
     return pdf
 
 
-def validate_output(path: Path, reader_mode: str) -> None:
+def validate_output(path: Path, reader_mode: str, *, native_media=False) -> None:
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("conversion output is empty")
     if path.stat().st_size > MAX_SOURCE_BYTES:
@@ -2027,7 +2148,10 @@ def validate_output(path: Path, reader_mode: str) -> None:
             if not archive.read("word/document.xml").strip():
                 raise RuntimeError("DOCX document body is empty")
     if reader_mode in {"audio", "video"}:
-        validate_media_output(path, reader_mode)
+        if native_media:
+            validate_native_media_output(path, reader_mode)
+        else:
+            validate_media_output(path, reader_mode)
 
 
 def validate_chm_epub(path: Path) -> None:
@@ -2103,6 +2227,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
+        if item.get("profile") == NATIVE_MEDIA_PROFILE:
+            item = prepare_native_media_item(item, source)
         if item["extension"] in {"rm", "rmvb"}:
             item = dict(item)
             item["source_media_mode"] = source_media_mode(source)
@@ -2132,14 +2258,26 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         with artifact_lock(target):
             if not target.exists():
                 if existing:
-                    asset_url = f"https://huggingface.co/datasets/{READER_ASSETS_REPO}/resolve/main/{existing['path']}"
-                    download_existing(asset_url, target, existing["sha256"])
+                    try:
+                        asset_url = f"https://huggingface.co/datasets/{READER_ASSETS_REPO}/resolve/main/{existing['path']}"
+                        download_existing(asset_url, target, existing["sha256"])
+                    except Exception as error:
+                        if not is_remote_not_found(error):
+                            raise
+                        # The manifest can outlive the dataset object. Rebuild at
+                        # the same content-addressed path from the source instead
+                        # of publishing another broken mapping.
+                        print(f"reusable Reader object missing; rebuilding "
+                              f"{item.get('repo', '')}/{item.get('path', item['key'])}")
+                        existing = None
+                        reused = False
+                if existing:
                     if target.stat().st_size != existing["bytes"]:
                         raise RuntimeError("reusable reader artifact size mismatch")
                     if item.get("output_name") == "page-manifest.json":
                         validate_page_manifest(target)
                     else:
-                        validate_output(target, item["reader_mode"])
+                        validate_output(target, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                     validate_reader_content(target, item, work)
                 else:
                     temporary = work / item["output_name"]
@@ -2152,7 +2290,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if item.get("output_name") == "page-manifest.json":
                         validate_page_manifest(temporary)
                     else:
-                        validate_output(temporary, item["reader_mode"])
+                        validate_output(temporary, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                     if item["extension"] in {"odt", "rtf", "chm"}:
                         validate_html_content(temporary)
                     if item["extension"] == "djvu":
@@ -2175,7 +2313,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 if item.get("output_name") == "page-manifest.json":
                     validate_page_manifest(target)
                 else:
-                    validate_output(target, item["reader_mode"])
+                    validate_output(target, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                 if item["extension"] == "chm" and item["reader_mode"] == "epub":
                     validate_chm_epub(target)
                 elif item["extension"] == "chm":

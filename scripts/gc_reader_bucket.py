@@ -51,6 +51,7 @@ class S3BucketStore:
             region_name="us-east-1",
             s3={"addressing_style": "path"},
             retries={"mode": "adaptive", "max_attempts": 8},
+            max_pool_connections=64,
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
         )
@@ -60,8 +61,12 @@ class S3BucketStore:
         try:
             self._list_workers = max(1, int(os.environ.get("HF_S3_LIST_WORKERS", "16")))
             self._manifest_workers = max(1, int(os.environ.get("HF_S3_MANIFEST_WORKERS", "16")))
+            self._verify_workers = max(1, int(os.environ.get("HF_S3_VERIFY_WORKERS", "64")))
         except ValueError as error:
-            raise RuntimeError("HF_S3_LIST_WORKERS and HF_S3_MANIFEST_WORKERS must be positive integers") from error
+            raise RuntimeError(
+                "HF_S3_LIST_WORKERS, HF_S3_MANIFEST_WORKERS and HF_S3_VERIFY_WORKERS "
+                "must be positive integers"
+            ) from error
         self._clients = {}
 
     def _location(self, bucket: str) -> tuple[str, str]:
@@ -157,6 +162,58 @@ class S3BucketStore:
                 raise S3NotFound(path) from error
             raise
         return response["Body"].read()
+
+    def existing_files(self, bucket: str, paths: set[str]) -> set[str]:
+        """Check known object keys without enumerating the entire bucket."""
+        namespace, bucket_name = self._location(bucket)
+        client = self._client(namespace)
+
+        def exists(path: str) -> str | None:
+            try:
+                client.head_object(Bucket=bucket_name, Key=path)
+                return path
+            except Exception as error:
+                response = getattr(error, "response", {})
+                code = response.get("Error", {}).get("Code")
+                status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+                    return None
+                raise
+
+        workers = min(self._verify_workers, max(1, len(paths)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            return {path for path in executor.map(exists, sorted(paths)) if path is not None}
+
+    def manifest_references(self, bucket: str, paths: set[str]) -> dict[str, set[str]]:
+        """Resolve the child objects required by page and ebook chapter manifests."""
+        manifests = {path for path in paths if path.endswith(("/page-manifest.json", "/chapter-manifest.json"))}
+
+        def load(path: str) -> tuple[str, set[str]]:
+            raw = self.read_bytes(bucket, path)
+            payload = json.loads(gzip.decompress(raw).decode("utf-8")
+                                 if raw[:2] == b"\x1f\x8b" else raw.decode("utf-8"))
+            root = posixpath.dirname(path)
+            if path.endswith("/page-manifest.json"):
+                count = payload.get("page_count") if isinstance(payload, dict) else None
+                if type(count) is not int or count < 1:
+                    raise ValueError(f"invalid page manifest: {path}")
+                return path, {f"{root}/pages/page-{number:06d}.webp" for number in range(1, count + 1)}
+            chapters = payload.get("chapters") if isinstance(payload, dict) else None
+            if not isinstance(chapters, list):
+                raise ValueError(f"invalid chapter manifest: {path}")
+            references = set()
+            for chapter in chapters:
+                if not isinstance(chapter, dict) or not isinstance(chapter.get("path"), str):
+                    raise ValueError(f"invalid chapter entry: {path}")
+                references.add(posixpath.normpath(posixpath.join(root, chapter["path"])))
+            search_index = payload.get("search_index")
+            if isinstance(search_index, dict) and isinstance(search_index.get("path"), str):
+                references.add(posixpath.normpath(posixpath.join(root, search_index["path"])))
+            return path, references
+
+        workers = min(self._manifest_workers, max(1, len(manifests)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            return dict(executor.map(load, sorted(manifests)))
 
     def put_json(self, bucket: str, path: str, payload: dict) -> None:
         namespace, bucket_name = self._location(bucket)

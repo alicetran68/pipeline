@@ -18,6 +18,7 @@ try:
         source_conversion_contract, source_url, validate_manifest,
     )
     from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
+    from .gc_reader_bucket import S3BucketStore
 except ImportError:
     from reader_assets import (
         EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
@@ -27,6 +28,7 @@ except ImportError:
         source_conversion_contract, source_url, validate_manifest,
     )
     from reader_bucket import INDEX_FILES, read_json as read_bucket_json
+    from gc_reader_bucket import S3BucketStore
 
 try:
     from . import shared
@@ -53,9 +55,38 @@ def shard_for_key(key: str, shard_count: int) -> int:
     return shared.hash_for_key(key, shard_count)
 
 
+def bucket_paths_to_check(records, manifest, *, repo="", extension="", exact_path="") -> set[str]:
+    """Collect existing mappings that would otherwise be skipped as ready."""
+    paths = set()
+    files = manifest.get("files", {})
+    extension = extension.lower().lstrip(".")
+    for record in records:
+        source_repo = str(record.get("Repo") or "")
+        ext = str(record.get("Extension") or "").lower().lstrip(".")
+        if (repo and source_repo != repo) or (extension and ext != extension):
+            continue
+        path = relative_path(record)
+        if exact_path and path != exact_path:
+            continue
+        if ext in {"htm", "html"} and any(
+                part.lower() == ".files" or part.lower().endswith(".files") or part.lower().endswith("_files")
+                for part in path.split("/")):
+            continue
+        if bucket_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0)) is None:
+            continue
+        existing = files.get(asset_key(source_repo, path), {})
+        if (existing.get("status") != "ready" or existing.get("bucket") != READER_ASSETS_BUCKET):
+            continue
+        if isinstance(existing.get("path"), str):
+            paths.add(existing["path"])
+        if isinstance(existing.get("chapter_manifest"), str):
+            paths.add(existing["chapter_manifest"])
+    return paths
+
+
 def build_queue(records, revisions, manifest, *, repo="", extension="", exact_path="", limit=0,
                   retry_failed=False, force=False, bucket_migrate=False,
-                  shard_count=1, shard_index=0) -> list[dict]:
+                  bucket_objects=None, shard_count=1, shard_index=0) -> list[dict]:
     if shard_count < 1 or not 0 <= shard_index < shard_count:
         raise ValueError("invalid reader asset shard")
     selected = []
@@ -93,8 +124,14 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             and isinstance(chapter_path, str)
             and not chapter_path.startswith("ebook-chapters/")
         )
+        object_present = (bucket_objects is None or existing.get("path") in bucket_objects)
+        chapter_manifest_present = (
+            not existing.get("chapter_manifest") or bucket_objects is None
+            or existing.get("chapter_manifest") in bucket_objects
+        )
         if (bucket_migrate and not force and existing.get("status") == "ready"
                 and existing.get("bucket") == READER_ASSETS_BUCKET
+                and object_present and chapter_manifest_present
                 and not chapter_bucket_path_missing_prefix):
             continue
         manual = str(existing.get("profile") or "").startswith("manual-")
@@ -146,13 +183,14 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
                   "ape": 3, "wma": 3, "amr": 3,
+                  "mp3": 3, "wav": 3, "m4a": 3, "flac": 3, "mpga": 3,
                   "flv": 4, "f4v": 4, "rm": 4, "rmvb": 4, "mkv": 4, "avi": 4,
-                  "mpg": 4, "mpeg": 4, "mts": 4, "ts": 4, "wmv": 4}
+                  "mpg": 4, "mpeg": 4, "mts": 4, "ts": 4, "wmv": 4, "mp4": 4, "mov": 4}
     selected.sort(key=lambda item: (priority[item["extension"]], item["repo"], item["path"]))
     return selected[:limit] if limit > 0 else selected
 
 
-def active_keys(records) -> list[str]:
+def active_keys(records, *, bucket_migrate=False) -> list[str]:
     keys = []
     for record in records:
         repo = str(record.get("Repo") or "")
@@ -162,7 +200,10 @@ def active_keys(records) -> list[str]:
                 part.lower() == ".files" or part.lower().endswith(".files") or part.lower().endswith("_files")
                 for part in path.split("/")):
             continue
-        if source_conversion_contract(repo, path, extension, int(record.get("Size") or 0)) is not None:
+        contract = (bucket_conversion_contract(repo, path, extension, int(record.get("Size") or 0))
+                    if bucket_migrate else
+                    source_conversion_contract(repo, path, extension, int(record.get("Size") or 0)))
+        if contract is not None:
             keys.append(asset_key(repo, path))
     return sorted(set(keys))
 
@@ -222,12 +263,26 @@ def main() -> int:
         manifest = validate_manifest(load_json(args.manifest))
     else:
         manifest = remote_manifest(HfApi(token=os.environ.get("HF_TOKEN") or None), args.assets_repo)
+    bucket_objects = None
+    if args.bucket_migrate:
+        # Verify only current mappings; listing millions of unrelated bucket objects is wasteful.
+        paths = bucket_paths_to_check(records, manifest, repo=args.repo,
+                                      extension=args.extension, exact_path=args.path)
+        store = S3BucketStore()
+        bucket_objects = store.existing_files(READER_ASSETS_BUCKET, paths)
+        manifest_references = store.manifest_references(READER_ASSETS_BUCKET, bucket_objects)
+        dependencies = set().union(*manifest_references.values()) if manifest_references else set()
+        present_dependencies = store.existing_files(READER_ASSETS_BUCKET, dependencies)
+        for manifest_path, required in manifest_references.items():
+            if not required.issubset(present_dependencies):
+                bucket_objects.discard(manifest_path)
     queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
                         limit=args.limit, retry_failed=args.retry_failed, force=args.force,
                          bucket_migrate=args.bucket_migrate,
-                        shard_count=args.shard_count, shard_index=args.shard_index)
+                         bucket_objects=bucket_objects,
+                         shard_count=args.shard_count, shard_index=args.shard_index)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    current_keys = active_keys(records)
+    current_keys = active_keys(records, bucket_migrate=args.bucket_migrate)
     args.output.write_bytes(canonical_json({
         "version": 1,
         "items": queue,
