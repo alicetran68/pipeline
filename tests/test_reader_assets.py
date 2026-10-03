@@ -3285,6 +3285,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('--queue "${queue}"', workflow)
         self.assertIn("Convert assigned queue", workflow)
         self.assertIn("Reader metadata request failed; retrying", workflow)
+        self.assertIn("inputs.retry_failed || github.event_name == 'schedule'", workflow)
         self.assertIn("READER_CHM_COMMAND_TIMEOUT:", workflow)
         self.assertIn("READER_DJVU_COMMAND_TIMEOUT:", workflow)
         self.assertIn("Source metadata request failed; retrying", workflow)

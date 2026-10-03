@@ -126,7 +126,7 @@ jobs:
             --path "${INPUT_PATH}"
             --limit "${total_limit}"
           )
-          if [[ "${{ inputs.retry_failed }}" == "true" ]]; then args+=(--retry-failed); fi
+          if [[ "${{ inputs.retry_failed || github.event_name == 'schedule' }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
           if [[ "${{ inputs.bucket_migrate || 'true' }}" == "true" ]]; then args+=(--bucket-migrate); fi
           retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
