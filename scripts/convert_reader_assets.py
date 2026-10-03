@@ -2027,6 +2027,8 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
+        if item.get("profile") == NATIVE_MEDIA_PROFILE:
+            item = prepare_native_media_item(item, source)
         if item["extension"] == "asx":
             item = dict(item)
             item["source_media_mode"] = source_media_mode(source)
