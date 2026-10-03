@@ -22,7 +22,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, pdf_assets, publish_reader_assets
 from scripts import gc_reader_bucket, prune_reader_assets, publish_search_reader_index
-from scripts import epub_chapters, reader_assets, scan_reader_assets
+from scripts import epub_chapters, reader_assets, render_spreadsheet_html, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
@@ -1679,6 +1679,12 @@ aW1hZ2U=
         self.assertEqual(values, ["标题", "说明", "测试", "第一行\n第二行,含逗号"])
         self.assertEqual((charts, images), (0, 0))
 
+    def test_csv_calc_import_uses_detected_delimiter(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "table.csv"
+            source.write_text("标题;说明\n测试;数据\n", encoding="utf-8")
+            self.assertEqual(render_spreadsheet_html.csv_filter_options(source), "59,34,76,1")
+
     def test_ods_inventory_reads_sheet_text_charts_and_images(self):
         content = '''<office:document-content
           xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -3027,6 +3033,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("tif|tiff) packages=(poppler-utils)", workflow)
         self.assertIn("mht|mhtml) packages=()", workflow)
         self.assertIn("pip install -r scripts/requirements-spreadsheet-render.txt", workflow)
+        self.assertIn('"${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods"', workflow)
         self.assertIn("playwright install --with-deps chromium", workflow)
         self.assertIn("libreoffice-calc python3-uno", workflow)
         self.assertNotIn("bucket_pdf_staging", workflow)

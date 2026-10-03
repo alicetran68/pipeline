@@ -174,7 +174,7 @@ jobs:
           packages=()
           case "${EXTENSION}" in
             static)
-              if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
+              if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" || "${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods" ]]; then
                 packages=(libreoffice-calc python3-uno fontconfig fonts-noto-cjk fonts-wqy-microhei)
               else
                 packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei)
@@ -200,7 +200,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${packages[@]}"
           fi
-          if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
+          if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" || "${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods" ]]; then
             pip install -r scripts/requirements-spreadsheet-render.txt
             if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
               python -m playwright install --with-deps chromium
@@ -233,7 +233,7 @@ jobs:
           BATCH_SIZE: ${{ inputs.limit || '20' }}
           CHECKPOINT_BATCHES: ${{ inputs.checkpoint_batches || '30' }}
           SHARD_INDEX: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ inputs.force == true && inputs.bucket_migrate != true && '1' || '20' }}
+          SHARD_COUNT: ${{ inputs.path != '' && '1' || (inputs.force == true && inputs.bucket_migrate != true && '1' || '20') }}
           SOURCE_REPO: ${{ inputs.repo || '' }}
           SOURCE_PATH: ${{ inputs.path || '' }}
           INPUT_EXTENSION: ${{ inputs.extension || '' }}

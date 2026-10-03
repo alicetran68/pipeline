@@ -2,6 +2,7 @@
 """Export every Calc sheet separately as HTML, without creating a PDF."""
 
 import argparse
+import csv
 from pathlib import Path
 import socket
 import subprocess
@@ -14,6 +15,24 @@ def property_value(uno, name, value):
     result.Name = name
     result.Value = value
     return result
+
+
+def csv_filter_options(source: Path) -> str:
+    raw = source.read_bytes()[:8192]
+    sample = None
+    for encoding in ("utf-8-sig", "gb18030", "cp1252"):
+        try:
+            sample = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if sample is None:
+        raise RuntimeError("spreadsheet CSV text encoding is unreadable")
+    try:
+        separator = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        separator = ","
+    return f"{ord(separator)},34,76,1"
 
 
 def main():
@@ -62,9 +81,10 @@ def main():
                 property_value(uno, "UpdateDocMode", 3),
             )
             if args.source.suffix.lower() == ".csv":
+                filter_options = csv_filter_options(args.source)
                 load_properties += (
                     property_value(uno, "FilterName", "Text - txt - csv (StarCalc)"),
-                    property_value(uno, "FilterOptions", "44,34,76,1"),
+                    property_value(uno, "FilterOptions", filter_options),
                 )
             try:
                 document = desktop.loadComponentFromURL(source_url, "_blank", 0, load_properties)
