@@ -174,7 +174,9 @@ jobs:
           packages=()
           case "${EXTENSION}" in
             static)
-              if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
+              if [[ "${INPUT_EXTENSION}" == "ape" || "${INPUT_EXTENSION}" == "wma" || "${INPUT_EXTENSION}" == "amr" || "${INPUT_EXTENSION}" == "mp3" || "${INPUT_EXTENSION}" == "wav" || "${INPUT_EXTENSION}" == "m4a" || "${INPUT_EXTENSION}" == "flac" || "${INPUT_EXTENSION}" == "mpga" || "${INPUT_EXTENSION}" == "mp4" || "${INPUT_EXTENSION}" == "mov" || "${INPUT_EXTENSION}" == "asx" || "${INPUT_EXTENSION}" == "flv" || "${INPUT_EXTENSION}" == "f4v" || "${INPUT_EXTENSION}" == "rm" || "${INPUT_EXTENSION}" == "rmvb" || "${INPUT_EXTENSION}" == "mkv" || "${INPUT_EXTENSION}" == "avi" || "${INPUT_EXTENSION}" == "mpg" || "${INPUT_EXTENSION}" == "mpeg" || "${INPUT_EXTENSION}" == "mts" || "${INPUT_EXTENSION}" == "ts" || "${INPUT_EXTENSION}" == "wmv" ]]; then
+                packages=(ffmpeg)
+              elif [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" ]]; then
                 packages=(libreoffice-calc python3-uno fontconfig fonts-noto-cjk fonts-wqy-microhei)
               else
                 packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei)
