@@ -271,7 +271,7 @@ def bucket_conversion_contract(repo: str, path: str, extension: str, source_byte
     if extension in {"xls", "xlsx"}:
         return (SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json")
     contract = source_conversion_contract(repo, path, extension, source_bytes)
-    if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub"}:
+    if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub", "audio", "video", "swf"}:
         return contract
     return None
 
