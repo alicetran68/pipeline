@@ -5,6 +5,7 @@ import argparse
 import concurrent.futures
 import base64
 import copy
+import csv
 import email.policy
 import hashlib
 import html
@@ -1402,7 +1403,9 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
     if not html_pages:
         raise RuntimeError("LibreOffice produced no spreadsheet worksheet HTML")
 
-    expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(source)
+    expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(
+        source, item.get("extension", source.suffix.lower().lstrip(".")),
+    )
 
     if len(html_pages) < len(expected_sheets):
         raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
@@ -1534,10 +1537,46 @@ def split_spreadsheet_html_rows(html_pages: list[Path], output: Path,
     return result
 
 
-def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], int, int]:
+def spreadsheet_source_inventory(source: Path, extension: str = "") -> tuple[list[str], list[str], int, int]:
+    extension = (extension or source.suffix.lower().lstrip(".")).lower().lstrip(".")
+    if extension == "csv":
+        raw = source.read_bytes()
+        text = None
+        for encoding in ("utf-8-sig", "gb18030", "cp1252"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            raise RuntimeError("spreadsheet CSV text encoding is unreadable")
+        sample = text[:8192]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except csv.Error:
+            dialect = csv.excel
+        values = [cell.strip() for row in csv.reader(io.StringIO(text, newline=""), dialect)
+                  for cell in row if cell.strip()]
+        return ["Sheet1"], list(dict.fromkeys(values)), 0, 0
     try:
         with zipfile.ZipFile(source) as archive:
             names = set(archive.namelist())
+            if "content.xml" in names and extension == "ods":
+                content = ET.fromstring(archive.read("content.xml"))
+                tables = content.findall(".//{*}table")
+                sheets = [next((value for key, value in table.attrib.items()
+                                if key.endswith("}name")), "") for table in tables]
+                values = []
+                for table in tables:
+                    for cell in table.findall(".//{*}table-cell"):
+                        text = "".join(node.text or "" for node in cell.findall(".//{*}p"))
+                        if text.strip():
+                            values.append(text.strip())
+                charts = sum(name.startswith("Object ") and name.endswith("/content.xml")
+                             for name in names)
+                images = sum(name.startswith("Pictures/") and not name.endswith("/")
+                             for name in names)
+                return sheets, list(dict.fromkeys(values)), charts, images
             workbook = ET.fromstring(archive.read("xl/workbook.xml"))
             relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
             targets = {node.attrib.get("Id"): node.attrib.get("Target", "")
@@ -1590,7 +1629,7 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
                             values.append(text.strip())
             charts = sum(name.startswith("xl/charts/chart") and name.endswith(".xml") for name in names)
             images = sum(name.startswith("xl/media/") and not name.endswith("/") for name in names)
-            return sheets, values, charts, images
+            return sheets, list(dict.fromkeys(values)), charts, images
     except (zipfile.BadZipFile, KeyError, ET.ParseError):
         try:
             import xlrd
@@ -1614,7 +1653,7 @@ def spreadsheet_source_inventory(source: Path) -> tuple[list[str], list[str], in
                             values.append(value.strip())
         finally:
             legacy.release_resources()
-        return sheets, values, 0, 0
+        return sheets, list(dict.fromkeys(values)), 0, 0
 
 
 def spreadsheet_text_variants(value: str) -> set[str]:

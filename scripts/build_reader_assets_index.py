@@ -7,11 +7,11 @@ import json
 from pathlib import Path
 
 try:
-    from .reader_assets import SPREADSHEET_PAGE_PROFILE, load_json, validate_manifest
+    from .reader_assets import SPREADSHEET_EXTENSIONS, load_json, validate_manifest
     from .pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     from . import shared
 except ImportError:
-    from reader_assets import SPREADSHEET_PAGE_PROFILE, load_json, validate_manifest
+    from reader_assets import SPREADSHEET_EXTENSIONS, load_json, validate_manifest
     from pdf_assets import PDF_DECISION_PROFILE, PDF_PROFILE
     import shared
 
@@ -25,8 +25,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
     spreadsheet_keys = {
         key for key, entry in manifest["files"].items()
         if entry.get("status") == "ready"
-        and entry.get("source_extension") in {"xls", "xlsx"}
-        and entry.get("profile") == SPREADSHEET_PAGE_PROFILE
+        and entry.get("source_extension") in SPREADSHEET_EXTENSIONS
         and entry.get("path", "").endswith("/page-manifest.json")
     }
     for key, entry in manifest["files"].items():

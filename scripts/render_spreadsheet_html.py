@@ -61,6 +61,11 @@ def main():
                 property_value(uno, "ReadOnly", True),
                 property_value(uno, "UpdateDocMode", 3),
             )
+            if args.source.suffix.lower() == ".csv":
+                load_properties += (
+                    property_value(uno, "FilterName", "Text - txt - csv (StarCalc)"),
+                    property_value(uno, "FilterOptions", "44,34,76,1"),
+                )
             try:
                 document = desktop.loadComponentFromURL(source_url, "_blank", 0, load_properties)
             except Exception as automatic_error:

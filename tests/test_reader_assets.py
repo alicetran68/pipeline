@@ -197,6 +197,11 @@ class ReaderAssetContractTests(unittest.TestCase):
             reader_assets.bucket_conversion_contract("repo", "table.xlsx", "xlsx"),
             (reader_assets.SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json"),
         )
+        for extension in ("xls", "xlsx", "csv", "ods"):
+            self.assertEqual(
+                reader_assets.bucket_conversion_contract("repo", f"table.{extension}", extension),
+                (reader_assets.SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json"),
+            )
 
     def test_large_docx_keeps_native_contract(self):
         self.assertEqual(
@@ -471,6 +476,17 @@ class ScannerTests(unittest.TestCase):
         )
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["reader_mode"], "pdf")
+        self.assertTrue(queue[0]["page_stream"])
+
+    def test_bucket_migration_queues_csv_as_a_page_stream(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Data", "Extension": "csv",
+                  "Folder": [], "Size": 100}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
+        )
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["profile"], reader_assets.SPREADSHEET_PAGE_PROFILE)
+        self.assertEqual(queue[0]["output_name"], "page-manifest.json")
         self.assertTrue(queue[0]["page_stream"])
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
@@ -1632,7 +1648,7 @@ aW1hZ2U=
         ocr_path = source + "/old-ocr/pages/page-manifest.json"
         manifest = {"files": {key: {
             "status": "ready", "reader_mode": "pdf", "source_extension": "xls",
-            "profile": reader_assets.SPREADSHEET_PAGE_PROFILE, "path": spreadsheet_path,
+            "profile": "libreoffice-html-pages-spreadsheet-v5", "path": spreadsheet_path,
             "bucket": reader_assets.READER_ASSETS_BUCKET,
         }}}
         pdf_manifest = {"files": {key: {
@@ -1653,6 +1669,40 @@ aW1hZ2U=
 
     def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
+
+    def test_csv_inventory_preserves_quoted_multiline_cells(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "table.csv"
+            source.write_text('标题,说明\n测试,"第一行\n第二行,含逗号"\n', encoding="utf-8")
+            sheets, values, charts, images = convert_reader_assets.spreadsheet_source_inventory(source)
+        self.assertEqual(sheets, ["Sheet1"])
+        self.assertEqual(values, ["标题", "说明", "测试", "第一行\n第二行,含逗号"])
+        self.assertEqual((charts, images), (0, 0))
+
+    def test_ods_inventory_reads_sheet_text_charts_and_images(self):
+        content = '''<office:document-content
+          xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+          xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+          xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+          xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+          xmlns:xlink="http://www.w3.org/1999/xlink">
+          <office:body><office:spreadsheet><table:table table:name="Data">
+          <table:table-row><table:table-cell office:value-type="string"><text:p>年度</text:p></table:table-cell>
+          <table:table-cell office:value-type="string"><text:p>数据</text:p></table:table-cell></table:table-row>
+          <table:table-row><table:table-cell><draw:frame><draw:object xlink:href="./Object 1"/></draw:frame></table:table-cell>
+          <table:table-cell><draw:frame><draw:image xlink:href="Pictures/chart.png"/></draw:frame></table:table-cell></table:table-row>
+          </table:table><table:table table:name="Notes"/></office:spreadsheet></office:body>
+          </office:document-content>'''
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "table.ods"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("content.xml", content)
+                archive.writestr("Object 1/content.xml", "<chart/>")
+                archive.writestr("Pictures/chart.png", b"image")
+            sheets, values, charts, images = convert_reader_assets.spreadsheet_source_inventory(source)
+        self.assertEqual(sheets, ["Data", "Notes"])
+        self.assertEqual(values, ["年度", "数据"])
+        self.assertEqual((charts, images), (1, 1))
 
     def test_spreadsheet_text_key_ignores_html_layout_whitespace(self):
         expected = "劳动者\n\t讨薪情况\n第二行"
