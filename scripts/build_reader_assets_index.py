@@ -16,7 +16,7 @@ except ImportError:
     import shared
 
 STATUS = {"ready": 2, "failed": 4}
-MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "text": "t", "markdown": "k", "image": "i", "audio": "a", "video": "v"}
+MODE = {"pdf": "p", "epub": "e", "foliate": "e", "docx": "d", "html": "h", "text": "t", "markdown": "k", "image": "i", "audio": "a", "video": "v", "swf": "f"}
 
 
 def build_index(manifest: dict, pdf_manifest: dict | None = None,

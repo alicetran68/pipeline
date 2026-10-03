@@ -183,10 +183,10 @@ class ReaderAssetContractTests(unittest.TestCase):
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
             {"doc", "docx", "epub", "htm", "html", "mobi", "azw3", "fb2", "odt", "rtf", "chm", "tif", "tiff", "djvu",
              "ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps", "mht", "mhtml", "ps", "caj", "kdh",
-             "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
+             "ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx", "swf", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg",
              "mpeg", "mts", "ts", "wmv", "mov", "mp4"},
         )
-        for extension in ("pdg", "swf", "asx", "dat", "mp3"):
+        for extension in ("pdg", "dat", "mp3"):
             self.assertNotIn(extension, reader_assets.CONVERTIBLE_EXTENSIONS)
 
     def test_source_url_pins_revision_and_encodes_path(self):
@@ -229,6 +229,8 @@ class ReaderAssetContractTests(unittest.TestCase):
             "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
             "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+            "asx": ("ffmpeg-media-auto-v1", "video", "video.mp4"),
+            "swf": ("native-swf-ruffle-v1", "swf", "document.swf"),
             **{extension: ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4") for extension in (
                 "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv",
             )},
@@ -540,7 +542,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["output_name"], "page-manifest.json")
         self.assertTrue(queue[0]["page_stream"])
 
-    def test_bucket_migration_queues_native_media_without_adding_source_conversion(self):
+    def test_bucket_migration_queues_native_media_and_keeps_conversion_fallback(self):
         record = {"Repo": "VoiceOfML/Test", "File": "concert", "Extension": "mp4",
                   "Folder": [], "Size": 100}
         queue = scan_reader_assets.build_queue(
@@ -549,11 +551,27 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(queue), 1)
         self.assertEqual(queue[0]["profile"], reader_assets.NATIVE_MEDIA_PROFILE)
         self.assertEqual(queue[0]["output_name"], "video.mp4")
-        self.assertIsNone(reader_assets.source_conversion_contract(record["Repo"], "concert.mp4", "mp4"))
+        self.assertEqual(
+            reader_assets.source_conversion_contract(record["Repo"], "concert.mp4", "mp4"),
+            reader_assets.conversion_contract("mp4"),
+        )
         self.assertIn(
             reader_assets.asset_key(record["Repo"], "concert.mp4"),
             scan_reader_assets.active_keys([record], bucket_migrate=True),
         )
+
+    def test_native_media_bucket_mapping_is_published_in_reader_sidecar(self):
+        path = "objects/aa/" + "a" * 64 + "/native-media-cdn-v1/audio.flac"
+        entry = {
+            "status": "ready", "reader_mode": "audio", "source_extension": "flac",
+            "path": path, "bucket": reader_assets.READER_ASSETS_BUCKET,
+        }
+        sidecar = build_reader_assets_index.build_index({
+            "version": 1, "files": {"VoiceOfML/Test\0audio.flac": entry},
+        })
+        self.assertEqual(sidecar["f"]["VoiceOfML/Test\0audio.flac"], {
+            "s": 2, "m": "a", "p": path, "b": reader_assets.READER_ASSETS_BUCKET,
+        })
 
     def test_bucket_migration_skips_an_asset_already_in_shared_bucket(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
@@ -2552,11 +2570,13 @@ class PublicationTests(unittest.TestCase):
             {"status": "ready", "reader_mode": "docx", "path": "objects/aa/document.docx"},
             {"status": "ready", "reader_mode": "html", "path": "objects/bb/document.html"},
             {"status": "ready", "reader_mode": "foliate", "path": "objects/cc/document.epub"},
-            {"status": "ready", "reader_mode": "audio", "path": "objects/dd/audio.mp3"},
+            {"status": "ready", "reader_mode": "audio", "path": "objects/dd/native-media-cdn-v1/audio.flac"},
+            {"status": "ready", "reader_mode": "video", "path": "objects/ee/native-media-cdn-v1/video.mp4"},
             {"status": "ready", "reader_mode": "pdf", "path": "objects/ee/document.pdf"},
         ]}
         self.assertEqual(publish_reader_assets.bucket_paths(data), [
             "objects/aa/document.docx", "objects/bb/document.html", "objects/cc/document.epub",
+            "objects/dd/native-media-cdn-v1/audio.flac", "objects/ee/native-media-cdn-v1/video.mp4",
         ])
 
     def test_spreadsheet_page_manifest_is_a_bucket_upload_candidate(self):
@@ -3232,7 +3252,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("djvulibre-bin", workflow)
         self.assertIn("doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf", workflow)
         self.assertIn("chm, tif, tiff, djvu, ppt, pptx, pps, odp", workflow)
-        self.assertIn("htm|html) packages=()", workflow)
+        self.assertIn("htm|html|swf) packages=()", workflow)
         self.assertIn("inputs.limit || '20'", workflow)
         self.assertIn("inputs.checkpoint_batches || '30'", workflow)
         self.assertIn("python scripts/publish_reader_assets.py", workflow)
@@ -3256,7 +3276,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)
         self.assertIn("checkout --detach 6c4bc32b15ce748d211f45d536f5d5511ef9f368", workflow)
         self.assertIn("CAJ2PDF_DIR: /opt/caj2pdf", workflow)
-        self.assertIn("ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
+        self.assertIn("ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|asx|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg)", workflow)
         self.assertIn("READER_CONVERSION_WORKERS:", workflow)
         self.assertIn("needs.plan.outputs.extension == 'djvu'", workflow)
         self.assertIn("needs.plan.outputs.count != '0'", workflow)

@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: txt, md, markdown, jpg, jpeg, png, gif, bmp, webp, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, mp3, wav, m4a, flac, mpga, mp4, mov, or blank
+        description: txt, md, markdown, jpg, jpeg, png, gif, bmp, webp, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, mp3, wav, m4a, flac, mpga, mp4, mov, asx, swf, or blank
         required: false
         default: ""
         type: string
@@ -184,7 +184,7 @@ jobs:
               ;;
             pdf) packages=(qpdf poppler-utils) ;;
             doc|docx|ppt|pptx|pps|odp|xls|xlsx|csv|ods|wps) packages=(libreoffice qpdf fontconfig fonts-noto-cjk fonts-wqy-microhei ghostscript poppler-utils tesseract-ocr tesseract-ocr-chi-sim) ;;
-            htm|html) packages=() ;;
+            htm|html|swf) packages=() ;;
             epub) packages=(calibre qpdf) ;;
             mobi|azw3|fb2) packages=(calibre) ;;
             odt) packages=(libreoffice) ;;
@@ -195,7 +195,7 @@ jobs:
             mht|mhtml) packages=() ;;
             ps) packages=(ghostscript poppler-utils) ;;
             caj|kdh) packages=(git mupdf-tools poppler-utils libjbig2dec0-dev) ;;
-            ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg) ;;
+            ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|asx|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
           esac
           if ((${#packages[@]})); then

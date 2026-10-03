@@ -1885,6 +1885,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
     if item.get("profile") == NATIVE_MEDIA_PROFILE:
         shutil.copyfile(source, target)
         return
+    if item.get("reader_mode") == "swf":
+        shutil.copyfile(source, target)
+        return
     if item.get("transcode_media"):
         if item["reader_mode"] == "audio":
             run_checked([
@@ -2079,14 +2082,15 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"caj", "kdh"}:
         convert_caj_family(source, target, work)
-    elif ext in {"ape", "wma", "amr", "flac", "m4a", "mpga", "wav"}:
+    elif ext in {"ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx"} and (
+            ext != "asx" or item.get("source_media_mode") == "audio"):
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
             "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
         ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
-    elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv", "mov", "mp4"}:
-        if ext in {"rm", "rmvb"} and item.get("source_media_mode") == "audio":
+    elif ext in {"asx", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv", "mov", "mp4"}:
+        if ext in {"asx", "rm", "rmvb"} and item.get("source_media_mode") == "audio":
             run_checked([
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi", "-i", "color=c=black:s=640x360:r=1",
@@ -2152,6 +2156,8 @@ def validate_output(path: Path, reader_mode: str, *, native_media=False) -> None
             validate_native_media_output(path, reader_mode)
         else:
             validate_media_output(path, reader_mode)
+    if reader_mode == "swf" and path.read_bytes()[:3] not in {b"FWS", b"CWS", b"ZWS"}:
+        raise RuntimeError("conversion output is not a SWF")
 
 
 def validate_chm_epub(path: Path) -> None:
@@ -2229,6 +2235,13 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         digest, source_bytes = download_source(item["source_url"], source)
         if item.get("profile") == NATIVE_MEDIA_PROFILE:
             item = prepare_native_media_item(item, source)
+        if item["extension"] == "asx":
+            item = dict(item)
+            item["source_media_mode"] = source_media_mode(source)
+            if item["source_media_mode"] == "audio":
+                item.update(profile="ffmpeg-audio-mp3-v1", reader_mode="audio", output_name="audio.mp3")
+            else:
+                item.update(profile="ffmpeg-video-mp4-h264-aac-v1", reader_mode="video", output_name="video.mp4")
         if item["extension"] in {"rm", "rmvb"}:
             item = dict(item)
             item["source_media_mode"] = source_media_mode(source)

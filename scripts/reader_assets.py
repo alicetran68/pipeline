@@ -73,6 +73,7 @@ CONVERTIBLE_EXTENSIONS = {
     "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "asx": ("ffmpeg-media-auto-v1", "video", "video.mp4"),
     "flac": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "m4a": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "mpga": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
@@ -88,6 +89,7 @@ CONVERTIBLE_EXTENSIONS = {
     "mts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "ts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "swf": ("native-swf-ruffle-v1", "swf", "document.swf"),
     "mov": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "mp4": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
@@ -313,7 +315,7 @@ def validate_manifest(manifest: dict) -> dict:
                 raise ValueError("invalid chapter manifest path")
             if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "foliate", "pdf"}:
                 raise ValueError("chapter manifest requires EPUB or PDF reader mode")
-            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "text", "markdown", "image", "audio", "video"}:
+            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "text", "markdown", "image", "audio", "video", "swf"}:
                 raise ValueError("reader manifest ready entry has invalid reader mode")
             if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
                 raise ValueError("reader manifest ready entry has invalid byte count")

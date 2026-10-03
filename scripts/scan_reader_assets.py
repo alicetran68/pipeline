@@ -182,10 +182,10 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                   "jpg": 3, "jpeg": 3, "png": 3, "gif": 3, "bmp": 3, "webp": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
-                  "ape": 3, "wma": 3, "amr": 3,
+                  "ape": 3, "wma": 3, "amr": 3, "asx": 4,
                   "mp3": 3, "wav": 3, "m4a": 3, "flac": 3, "mpga": 3,
                   "flv": 4, "f4v": 4, "rm": 4, "rmvb": 4, "mkv": 4, "avi": 4,
-                  "mpg": 4, "mpeg": 4, "mts": 4, "ts": 4, "wmv": 4, "mp4": 4, "mov": 4}
+                  "mpg": 4, "mpeg": 4, "mts": 4, "ts": 4, "wmv": 4, "mp4": 4, "mov": 4, "swf": 4}
     selected.sort(key=lambda item: (priority[item["extension"]], item["repo"], item["path"]))
     return selected[:limit] if limit > 0 else selected
 
