@@ -3,6 +3,7 @@
 
 import argparse
 import concurrent.futures
+import gzip
 import json
 import mimetypes
 import os
@@ -724,6 +725,31 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                     {"results": [result]}, (artifact_roots or {}).get(result.get("path"), bundle))
                 updates.append(asset_record(item))
             lifecycle = merge_lifecycle(lifecycle, updates)
+            # The bucket lifecycle is the durable object inventory. A delayed
+            # manifest read from another publish shard must not erase mappings
+            # that are already finalized in that inventory.
+            for key, record in lifecycle.get("files", {}).items():
+                if key in manifest.get("files", {}) or record.get("phase") != "final":
+                    continue
+                profile = str(record.get("profile") or "")
+                if profile.startswith("native-swf-"):
+                    reader_mode = "swf"
+                elif profile.startswith("ffmpeg-audio-"):
+                    reader_mode = "audio"
+                elif profile.startswith("ffmpeg-video-"):
+                    reader_mode = "video"
+                else:
+                    continue
+                source_extension = key.rsplit(".", 1)[-1].lower()
+                manifest.setdefault("files", {})[key] = {
+                    "status": "ready", "source_revision": record.get("source_revision", ""),
+                    "source_sha256": record.get("source_sha256", ""),
+                    "source_extension": source_extension, "profile": profile,
+                    "reader_mode": reader_mode, "path": record["path"],
+                    "bytes": record["bytes"], "sha256": record["sha256"],
+                    "bucket": READER_ASSETS_BUCKET,
+                }
+            validate_manifest(manifest)
             with tempfile.TemporaryDirectory(prefix="reader-index-") as root:
                 index_root = Path(root) / "reader-index"
                 index_root.mkdir(parents=True, exist_ok=True)
@@ -732,6 +758,19 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                                if operation.path_in_repo == SIDECAR_NAME)
                 if isinstance(sidecar, str):
                     sidecar = Path(sidecar).read_bytes()
+                sidecar_data = json.loads(gzip.decompress(sidecar))
+                sidecar_files = sidecar_data.setdefault("f", {})
+                for key, entry in manifest.get("files", {}).items():
+                    if key in sidecar_files or entry.get("reader_mode") not in {"audio", "video", "swf"}:
+                        continue
+                    mode = {"audio": "a", "video": "v", "swf": "f"}[entry["reader_mode"]]
+                    sidecar_files[key] = {
+                        "s": 2, "m": mode, "p": entry["path"], "b": READER_ASSETS_BUCKET,
+                    }
+                sidecar = gzip.compress(
+                    json.dumps(sidecar_data, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":")).encode(), mtime=0,
+                )
                 (index_root / SIDECAR_NAME).write_bytes(sidecar)
                 (index_root / INDEX_FILES["lifecycle"].rsplit("/", 1)[-1]).write_text(
                     json.dumps(lifecycle, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
