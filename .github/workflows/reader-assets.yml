@@ -193,7 +193,7 @@ jobs:
             mht|mhtml) packages=() ;;
             ps) packages=(ghostscript poppler-utils) ;;
             caj|kdh) packages=(git mupdf-tools poppler-utils libjbig2dec0-dev) ;;
-            ape|wma|amr|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg) ;;
+            ape|wma|amr|mp3|wav|m4a|flac|mpga|mp4|mov|asx|flv|f4v|rm|rmvb|mkv|avi|mpg|mpeg|mts|ts|wmv) packages=(ffmpeg) ;;
             *) echo "Unsupported queued extension: ${EXTENSION}" >&2; exit 1 ;;
           esac
           if ((${#packages[@]})); then

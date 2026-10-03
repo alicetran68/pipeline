@@ -41,7 +41,7 @@ except ImportError:
     import shared
 
 SIDECAR_NAME = "reader_assets.json.gz"
-BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "epub"}
+BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "epub", "audio", "video", "swf"}
 EBOOK_CHAPTERS_PREFIX = "ebook-chapters/"
 
 

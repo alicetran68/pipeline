@@ -37,12 +37,12 @@ from PIL import Image, ImageSequence
 
 try:
     from .reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
 except ImportError:
     from reader_assets import (
-        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
+        EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE, PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
 
@@ -537,6 +537,42 @@ def validate_media_output(path: Path, reader_mode: str) -> None:
             or not 0 < width <= 1920 or not 0 < height <= 1080
             or (audio and audio[0].get("codec_name") != "aac")):
         raise RuntimeError("conversion output is not compatible H.264/AAC video")
+
+
+def browser_native_media(path: Path, extension: str, reader_mode: str) -> bool:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    media_format = probe.get("format") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not isinstance(media_format, dict):
+        raise RuntimeError("source media has no stream metadata")
+    names = set(str(media_format.get("format_name") or "").split(","))
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    video = [s for s in streams if s.get("codec_type") == "video"
+             and not s.get("disposition", {}).get("attached_pic")]
+    if reader_mode == "audio":
+        if not audio or video:
+            raise RuntimeError("native audio asset has invalid streams")
+        codec = str(audio[0].get("codec_name") or "")
+        return ((extension in {"mp3", "mpga"} and codec == "mp3")
+                or (extension == "wav" and "wav" in names and codec.startswith("pcm_"))
+                or (extension == "flac" and codec == "flac")
+                or (extension == "m4a" and codec == "aac"))
+    if reader_mode != "video" or len(video) != 1 or len(audio) > 1:
+        raise RuntimeError("native video asset has invalid streams")
+    return (video[0].get("codec_name") == "h264" and video[0].get("pix_fmt") == "yuv420p"
+            and (not audio or audio[0].get("codec_name") == "aac")
+            and bool(names.intersection({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})))
+
+
+def prepare_native_media_item(item: dict, source: Path) -> dict:
+    if item.get("profile") != NATIVE_MEDIA_PROFILE or browser_native_media(source, item["extension"], item["reader_mode"]):
+        return item
+    result = dict(item)
+    if item["reader_mode"] == "audio":
+        result.update(profile="ffmpeg-audio-mp3-v1", output_name="audio.mp3", transcode_media=True)
+    else:
+        result.update(profile="ffmpeg-video-mp4-h264-aac-v1", output_name="video.mp4", transcode_media=True)
+    return result
 
 
 def embedded_pdf_fonts(path: Path) -> list[str]:
@@ -1648,6 +1684,22 @@ def validate_reader_content(path: Path, item: dict, work: Path) -> None:
 def convert_file(item: dict, source: Path, target: Path, work: Path,
                  source_sha256: str = "", object_path: str = "") -> None:
     ext = item["extension"]
+    if item.get("profile") == NATIVE_MEDIA_PROFILE or item.get("reader_mode") == "swf":
+        shutil.copyfile(source, target)
+        return
+    if item.get("transcode_media"):
+        if item["reader_mode"] == "audio":
+            run_checked(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                         "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+                         "-c:a", "libmp3lame", "-q:a", "3", str(target)], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+        else:
+            run_checked(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                         "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",
+                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                         "-vf", "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(target)],
+                        timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
+        return
     office_profile = (work / "libreoffice-profile").resolve().as_uri()
     explicit_password = item.get("source_password") or source_password(item.get("repo", ""), item.get("path", ""))
     password = explicit_password
@@ -1827,14 +1879,15 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         ], timeout_seconds=POSTSCRIPT_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"caj", "kdh"}:
         convert_caj_family(source, target, work)
-    elif ext in {"ape", "wma", "amr"}:
+    elif ext in {"ape", "wma", "amr", "flac", "m4a", "mpga", "wav", "asx"} and (
+            ext != "asx" or item.get("source_media_mode") == "audio"):
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
             "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
         ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
-    elif ext in {"flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv"}:
-        if ext in {"rm", "rmvb"} and item.get("source_media_mode") == "audio":
+    elif ext in {"asx", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv", "mov", "mp4"}:
+        if ext in {"asx", "rm", "rmvb"} and item.get("source_media_mode") == "audio":
             run_checked([
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi", "-i", "color=c=black:s=640x360:r=1",
@@ -1897,6 +1950,8 @@ def validate_output(path: Path, reader_mode: str) -> None:
                 raise RuntimeError("DOCX document body is empty")
     if reader_mode in {"audio", "video"}:
         validate_media_output(path, reader_mode)
+    if reader_mode == "swf" and path.read_bytes()[:3] not in {b"FWS", b"CWS", b"ZWS"}:
+        raise RuntimeError("conversion output is not a SWF")
 
 
 def validate_chm_epub(path: Path) -> None:
@@ -1972,6 +2027,13 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
         work = Path(root)
         source = work / f"source.{item['extension']}"
         digest, source_bytes = download_source(item["source_url"], source)
+        if item["extension"] == "asx":
+            item = dict(item)
+            item["source_media_mode"] = source_media_mode(source)
+            if item["source_media_mode"] == "audio":
+                item.update(profile="ffmpeg-audio-mp3-v1", reader_mode="audio", output_name="audio.mp3")
+            else:
+                item.update(profile="ffmpeg-video-mp4-h264-aac-v1", reader_mode="video", output_name="video.mp4")
         if item["extension"] in {"rm", "rmvb"}:
             item = dict(item)
             item["source_media_mode"] = source_media_mode(source)

@@ -20,6 +20,15 @@ CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v8-bucket"
 SPREADSHEET_PAGE_PROFILE = "libreoffice-html-pages-spreadsheet-v5"
+NATIVE_MEDIA_PROFILE = "native-media-cdn-v1"
+BUCKET_NATIVE_MEDIA_EXTENSIONS = {
+    **{extension: (NATIVE_MEDIA_PROFILE, "audio", f"audio.{extension}") for extension in (
+        "mp3", "wav", "m4a", "flac", "mpga",
+    )},
+    **{extension: (NATIVE_MEDIA_PROFILE, "video", f"video.{extension}") for extension in (
+        "mp4", "mov",
+    )},
+}
 BUCKET_NATIVE_EXTENSIONS = {
     "txt": ("native-text-v1", "text", "document.txt"),
     "md": ("native-markdown-v1", "markdown", "document.md"),
@@ -63,6 +72,11 @@ CONVERTIBLE_EXTENSIONS = {
     "ape": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "wma": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "amr": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "asx": ("ffmpeg-media-auto-v1", "video", "video.mp4"),
+    "flac": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "m4a": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "mpga": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
+    "wav": ("ffmpeg-audio-mp3-v1", "audio", "audio.mp3"),
     "flv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "f4v": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "rm": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
@@ -74,6 +88,9 @@ CONVERTIBLE_EXTENSIONS = {
     "mts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "ts": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
     "wmv": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "swf": ("native-swf-ruffle-v1", "swf", "document.swf"),
+    "mov": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
+    "mp4": ("ffmpeg-video-mp4-h264-aac-v1", "video", "video.mp4"),
 }
 PROTECTED_PDF_CONTRACT = ("qpdf-decrypted-v1", "pdf", "document.pdf")
 GBK_PDF_CONTRACT = ("gbk-font-repair-v1", "pdf", "document.pdf")
@@ -249,6 +266,8 @@ def bucket_conversion_contract(repo: str, path: str, extension: str, source_byte
         return ("pdf-staging-v1", "pdf", "document.pdf")
     if extension in BUCKET_NATIVE_EXTENSIONS:
         return BUCKET_NATIVE_EXTENSIONS[extension]
+    if extension in BUCKET_NATIVE_MEDIA_EXTENSIONS:
+        return BUCKET_NATIVE_MEDIA_EXTENSIONS[extension]
     if extension in {"xls", "xlsx"}:
         return (SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json")
     contract = source_conversion_contract(repo, path, extension, source_bytes)
@@ -295,7 +314,7 @@ def validate_manifest(manifest: dict) -> dict:
                 raise ValueError("invalid chapter manifest path")
             if "chapter_manifest" in entry and entry.get("reader_mode") not in {"epub", "foliate", "pdf"}:
                 raise ValueError("chapter manifest requires EPUB or PDF reader mode")
-            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "text", "markdown", "image", "audio", "video"}:
+            if "reader_mode" in entry and entry.get("reader_mode") not in {"pdf", "epub", "foliate", "docx", "html", "text", "markdown", "image", "audio", "video", "swf"}:
                 raise ValueError("reader manifest ready entry has invalid reader mode")
             if "bytes" in entry and (not isinstance(entry.get("bytes"), int) or entry["bytes"] <= 0):
                 raise ValueError("reader manifest ready entry has invalid byte count")
