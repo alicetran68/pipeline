@@ -519,6 +519,20 @@ def build_publish(api: HfApi, repo_id: str, bundle: Path, revision: str | None =
                         "sha256": entry["sha256"],
                         "reader_mode": entry["reader_mode"],
                     }
+    # Bucket-only migrations can arrive while the bucket index is being
+    # refreshed by another publish shard. Keep the current shard's ready
+    # bucket mappings in the manifest we are about to publish as well.
+    for result in data["results"]:
+        if result.get("status") != "ready" or result.get("reader_mode") not in BUCKET_READER_MODES:
+            continue
+        entry = {key: value for key, value in result.items() if key != "key"}
+        entry["bucket"] = READER_ASSETS_BUCKET
+        if entry.get("chapter_manifest"):
+            if data.get("bucket_migration"):
+                entry["chapter_manifest"] = bucket_chapter_path(entry["chapter_manifest"])
+            entry["chapter_bucket"] = READER_ASSETS_BUCKET
+        files[result["key"]] = entry
+
     active_keys = set(data.get("active_keys", []))
     if data.get("authoritative_snapshot") is True:
         for key in set(files) - active_keys:
