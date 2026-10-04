@@ -729,7 +729,9 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
             # manifest read from another publish shard must not erase mappings
             # that are already finalized in that inventory.
             for key, record in lifecycle.get("files", {}).items():
-                if key in manifest.get("files", {}) or record.get("phase") != "final":
+                current = manifest.get("files", {}).get(key, {})
+                if (record.get("phase") != "final"
+                        or current.get("bucket") == READER_ASSETS_BUCKET):
                     continue
                 profile = str(record.get("profile") or "")
                 if profile.startswith("native-swf-"):
