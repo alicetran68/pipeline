@@ -543,6 +543,27 @@ def validate_media_output(path: Path, reader_mode: str) -> None:
         raise RuntimeError("conversion output is not compatible H.264/AAC video")
 
 
+def validate_native_media_output(path: Path, reader_mode: str) -> None:
+    probe = media_probe(path)
+    streams = probe.get("streams") if isinstance(probe, dict) else None
+    media_format = probe.get("format") if isinstance(probe, dict) else None
+    if not isinstance(streams, list) or not isinstance(media_format, dict):
+        raise RuntimeError("native media output has no stream metadata")
+    try:
+        duration = float(media_format.get("duration") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("native media output has invalid duration") from exc
+    if not 0 < duration <= 24 * 60 * 60:
+        raise RuntimeError("native media output duration is outside limits")
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    video = [s for s in streams if s.get("codec_type") == "video"
+             and not s.get("disposition", {}).get("attached_pic")]
+    if reader_mode == "audio" and (not audio or video):
+        raise RuntimeError("native audio output has invalid streams")
+    if reader_mode == "video" and (len(video) != 1 or len(audio) > 1):
+        raise RuntimeError("native video output has invalid streams")
+
+
 def browser_native_media(path: Path, extension: str, reader_mode: str) -> bool:
     probe = media_probe(path)
     streams = probe.get("streams") if isinstance(probe, dict) else None
@@ -1928,7 +1949,7 @@ def normalized_office_pdf(source: Path, work: Path) -> Path:
     return pdf
 
 
-def validate_output(path: Path, reader_mode: str) -> None:
+def validate_output(path: Path, reader_mode: str, *, native_media=False) -> None:
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("conversion output is empty")
     if path.stat().st_size > MAX_SOURCE_BYTES:
@@ -1953,7 +1974,10 @@ def validate_output(path: Path, reader_mode: str) -> None:
             if not archive.read("word/document.xml").strip():
                 raise RuntimeError("DOCX document body is empty")
     if reader_mode in {"audio", "video"}:
-        validate_media_output(path, reader_mode)
+        if native_media:
+            validate_native_media_output(path, reader_mode)
+        else:
+            validate_media_output(path, reader_mode)
     if reader_mode == "swf" and path.read_bytes()[:3] not in {b"FWS", b"CWS", b"ZWS"}:
         raise RuntimeError("conversion output is not a SWF")
 
@@ -2076,7 +2100,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if item.get("output_name") == "page-manifest.json":
                         validate_page_manifest(target)
                     else:
-                        validate_output(target, item["reader_mode"])
+                        validate_output(target, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                     validate_reader_content(target, item, work)
                 else:
                     temporary = work / item["output_name"]
@@ -2089,7 +2113,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                     if item.get("output_name") == "page-manifest.json":
                         validate_page_manifest(temporary)
                     else:
-                        validate_output(temporary, item["reader_mode"])
+                        validate_output(temporary, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                     if item["extension"] in {"odt", "rtf", "chm"}:
                         validate_html_content(temporary)
                     if item["extension"] == "djvu":
@@ -2112,7 +2136,7 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
                 if item.get("output_name") == "page-manifest.json":
                     validate_page_manifest(target)
                 else:
-                    validate_output(target, item["reader_mode"])
+                    validate_output(target, item["reader_mode"], native_media=item.get("profile") == NATIVE_MEDIA_PROFILE)
                 if item["extension"] == "chm" and item["reader_mode"] == "epub":
                     validate_chm_epub(target)
                 elif item["extension"] == "chm":

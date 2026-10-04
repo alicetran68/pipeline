@@ -820,6 +820,17 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(command[-3:], ["-f", "mp3", str(target)])
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
 
+    def test_native_wav_validation_accepts_pcm_container(self):
+        probe = {
+            "streams": [{"codec_type": "audio", "codec_name": "pcm_s16le"}],
+            "format": {"duration": "12", "format_name": "wav"},
+        }
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "audio.wav"
+            path.write_bytes(b"wav")
+            with patch.object(convert_reader_assets, "media_probe", return_value=probe):
+                convert_reader_assets.validate_output(path, "audio", native_media=True)
+
     def test_video_conversion_uses_h264_aac_faststart_contract(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
