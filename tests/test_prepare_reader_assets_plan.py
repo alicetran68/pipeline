@@ -53,6 +53,7 @@ class PrepareReaderAssetsPlanTests(unittest.TestCase):
             self.assertEqual(len(json.loads((root / "queue.json").read_text())["items"]), 3)
             self.assertEqual(len(json.loads((root / "queue-0.json").read_text())["items"]), 3)
             self.assertEqual(json.loads((root / "queue-19.json").read_text())["items"], [])
+            self.assertEqual(json.loads((root / "shards.json").read_text()), [0])
 
     def test_bucket_migration_keeps_twenty_shards_for_scoped_extension(self):
         with tempfile.TemporaryDirectory() as directory:
