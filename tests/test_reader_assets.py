@@ -283,6 +283,29 @@ class ReaderAssetContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid status"):
             reader_assets.validate_manifest({"version": 1, "files": {"key": {"status": "pending"}}})
 
+    def test_lifecycle_restores_final_media_mappings(self):
+        manifest = reader_assets.empty_manifest()
+        lifecycle = {"files": {
+            "VoiceOfML/Test\\0audio.flac": {
+                "phase": "final", "profile": "native-media-cdn-v1",
+                "path": "objects/aa/native-media-cdn-v1/audio.flac", "bytes": 12,
+                "sha256": "a" * 64, "source_sha256": "b" * 64, "source_revision": "rev",
+            },
+            "VoiceOfML/Test\\0flash.swf": {
+                "phase": "final", "profile": "native-swf-ruffle-v1",
+                "path": "objects/bb/native-swf-ruffle-v1/document.swf", "bytes": 13,
+                "sha256": "c" * 64, "source_sha256": "d" * 64, "source_revision": "rev",
+            },
+            "VoiceOfML/Test\\0pending.wav": {
+                "phase": "uploading", "profile": "native-media-cdn-v1",
+                "path": "objects/cc/audio.wav", "bytes": 1, "sha256": "e" * 64,
+            },
+        }}
+        reader_assets.restore_bucket_media_mappings(manifest, lifecycle)
+        self.assertEqual(manifest["files"]["VoiceOfML/Test\\0audio.flac"]["reader_mode"], "audio")
+        self.assertEqual(manifest["files"]["VoiceOfML/Test\\0flash.swf"]["reader_mode"], "swf")
+        self.assertNotIn("VoiceOfML/Test\\0pending.wav", manifest["files"])
+
     def test_only_known_password_pdfs_have_a_conversion_contract(self):
         self.assertEqual(
             reader_assets.source_conversion_contract("repo", "书（密码1949）.pdf", "pdf"),

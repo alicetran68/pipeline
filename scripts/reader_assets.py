@@ -289,6 +289,41 @@ def empty_manifest() -> dict:
     return {"version": MANIFEST_VERSION, "files": {}}
 
 
+def restore_bucket_media_mappings(manifest: dict, lifecycle: dict) -> dict:
+    """Recover finalized media mappings from the durable bucket lifecycle index."""
+    files = manifest.setdefault("files", {})
+    for key, record in lifecycle.get("files", {}).items():
+        current = files.get(key, {})
+        if record.get("phase") != "final" or current.get("bucket") == READER_ASSETS_BUCKET:
+            continue
+        profile = str(record.get("profile") or "")
+        path = str(record.get("path") or "")
+        if profile == NATIVE_MEDIA_PROFILE:
+            mode = "audio" if Path(path).name.startswith("audio.") else "video"
+        elif profile.startswith("native-swf-"):
+            mode = "swf"
+        elif profile.startswith("ffmpeg-audio-"):
+            mode = "audio"
+        elif profile.startswith("ffmpeg-video-"):
+            mode = "video"
+        else:
+            continue
+        files[key] = {
+            **current,
+            "status": "ready",
+            "source_revision": record.get("source_revision", ""),
+            "source_sha256": record.get("source_sha256", ""),
+            "source_extension": key.rsplit(".", 1)[-1].lower(),
+            "profile": profile,
+            "reader_mode": mode,
+            "path": path,
+            "bytes": record.get("bytes"),
+            "sha256": record.get("sha256"),
+            "bucket": READER_ASSETS_BUCKET,
+        }
+    return manifest
+
+
 def validate_manifest(manifest: dict) -> dict:
     if not isinstance(manifest, dict) or manifest.get("version") != MANIFEST_VERSION:
         raise ValueError("unsupported reader manifest version")

@@ -24,7 +24,7 @@ try:
     from .reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_storage_path,
-        READER_ASSETS_BUCKET,
+        READER_ASSETS_BUCKET, restore_bucket_media_mappings,
     )
 except ImportError:
     from build_reader_assets_index import encode_index
@@ -33,7 +33,7 @@ except ImportError:
     from reader_assets import (
         MANIFEST_NAME, READER_ASSETS_REPO, canonical_json, empty_manifest, load_json,
         reusable_object_key, validate_manifest, validate_storage_path,
-        READER_ASSETS_BUCKET,
+        READER_ASSETS_BUCKET, restore_bucket_media_mappings,
     )
 
 try:
@@ -350,7 +350,13 @@ def file_sha256(path: Path) -> str:
 def remote_manifest(api: HfApi, repo_id: str, revision: str | None = None) -> dict:
     if isinstance(api, HfApi):
         try:
-            return validate_manifest(read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN")))
+            token = os.environ.get("HF_TOKEN")
+            manifest = read_bucket_json(INDEX_FILES["manifest"], token)
+            try:
+                lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], token)
+            except (FileNotFoundError, OSError, ValueError):
+                lifecycle = {"version": 1, "files": {}}
+            return validate_manifest(restore_bucket_media_mappings(manifest, lifecycle))
         except (FileNotFoundError, OSError, ValueError):
             pass
     try:

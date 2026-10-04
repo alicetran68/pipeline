@@ -15,7 +15,7 @@ try:
         SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
         conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
-        source_conversion_contract, source_url, validate_manifest,
+        restore_bucket_media_mappings, source_conversion_contract, source_url, validate_manifest,
     )
     from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
 except ImportError:
@@ -24,7 +24,7 @@ except ImportError:
         SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
         conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
-        source_conversion_contract, source_url, validate_manifest,
+        restore_bucket_media_mappings, source_conversion_contract, source_url, validate_manifest,
     )
     from reader_bucket import INDEX_FILES, read_json as read_bucket_json
 
@@ -37,7 +37,13 @@ except ImportError:
 def remote_manifest(api: HfApi, repo_id: str) -> dict:
     if type(api).__name__ == "HfApi":
         try:
-            return validate_manifest(read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN")))
+            token = os.environ.get("HF_TOKEN")
+            manifest = read_bucket_json(INDEX_FILES["manifest"], token)
+            try:
+                lifecycle = read_bucket_json(INDEX_FILES["lifecycle"], token)
+            except (FileNotFoundError, OSError, ValueError):
+                lifecycle = {"version": 1, "files": {}}
+            return validate_manifest(restore_bucket_media_mappings(manifest, lifecycle))
         except (FileNotFoundError, OSError, ValueError):
             return empty_manifest()
     try:
