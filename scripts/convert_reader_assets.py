@@ -528,7 +528,11 @@ def validate_media_output(path: Path, reader_mode: str) -> None:
         raise RuntimeError("media output contains unsupported streams")
     if reader_mode == "audio":
         if len(audio) != 1 or video or audio[0].get("codec_name") != "mp3" or "mp3" not in format_names:
-            raise RuntimeError("conversion output is not compatible MP3 audio")
+            raise RuntimeError(
+                "conversion output is not compatible MP3 audio "
+                f"(streams={[(s.get('codec_type'), s.get('codec_name')) for s in streams]}, "
+                f"format={media_format.get('format_name')})"
+            )
         return
     if reader_mode != "video" or len(video) != 1 or len(audio) > 1:
         raise RuntimeError("conversion output has invalid video streams")
@@ -1884,7 +1888,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         run_checked([
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-i", str(source), "-map", "0:a:0", "-vn", "-sn", "-dn",
-            "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", str(target),
+            "-map_metadata", "-1", "-c:a", "libmp3lame", "-q:a", "3", "-f", "mp3", str(target),
         ], timeout_seconds=MEDIA_COMMAND_TIMEOUT_SECONDS)
     elif ext in {"asx", "flv", "f4v", "rm", "rmvb", "mkv", "avi", "mpg", "mpeg", "mts", "ts", "wmv", "mov", "mp4"}:
         if ext in {"asx", "rm", "rmvb"} and item.get("source_media_mode") == "audio":

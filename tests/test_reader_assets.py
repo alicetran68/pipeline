@@ -817,6 +817,7 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(command[0:6], ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
             self.assertIn("libmp3lame", command)
             self.assertIn("0:a:0", command)
+            self.assertEqual(command[-3:], ["-f", "mp3", str(target)])
             self.assertEqual(run.call_args.kwargs["timeout_seconds"], convert_reader_assets.MEDIA_COMMAND_TIMEOUT_SECONDS)
 
     def test_video_conversion_uses_h264_aac_faststart_contract(self):
