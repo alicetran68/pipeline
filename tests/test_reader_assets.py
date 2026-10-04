@@ -2353,6 +2353,29 @@ class PublicationTests(unittest.TestCase):
                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         fake_client.head_object.assert_called_once_with(Bucket="pdf-pages", Key="objects/aa/document.docx")
 
+    def test_s3_reader_upload_retries_multipart_read_timeout(self):
+        from botocore.exceptions import ReadTimeoutError
+
+        fake_client = Mock()
+        fake_client.upload_file.side_effect = [
+            ReadTimeoutError(endpoint_url="https://s3.example", error=TimeoutError()),
+            None,
+        ]
+        fake_client.head_object.return_value = {"ContentLength": 5}
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
+            "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
+            "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",
+        }), patch.object(publish_reader_assets, "_s3_client", return_value=fake_client), \
+                patch.object(publish_reader_assets.time, "sleep"):
+            local = Path(root) / "video.mp4"
+            local.write_bytes(b"asset")
+            publish_reader_assets.s3_upload_artifacts(
+                {"objects/aa/video.mp4": (Path(root), str(local))},
+                "vomebook/pdf-pages",
+            )
+        self.assertEqual(fake_client.upload_file.call_count, 2)
+        fake_client.head_object.assert_called_once_with(Bucket="pdf-pages", Key="objects/aa/video.mp4")
+
     def test_bucket_migration_uploads_reused_dataset_objects_before_marking_bucket(self):
         key = "VoiceOfML/Test\0Saved.mht"
         result = {

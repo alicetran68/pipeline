@@ -16,6 +16,7 @@ from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 
 try:
     from .build_reader_assets_index import encode_index
@@ -270,14 +271,18 @@ def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
                     raise RuntimeError(f"uploaded Reader object size mismatch: {remote_path}")
                 return
             except Exception as error:
-                response = getattr(error, "response", {})
+                response = getattr(error, "response", None) or {}
                 status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
                 code = response.get("Error", {}).get("Code")
-                retryable = status in {408, 429, 500, 502, 503, 504} or code in {"SlowDown", "RequestTimeout"}
+                timeout_error = isinstance(error, (ConnectTimeoutError, ReadTimeoutError, TimeoutError))
+                retryable = (timeout_error
+                              or status in {408, 429, 500, 502, 503, 504}
+                              or code in {"SlowDown", "RequestTimeout"})
                 if not retryable or attempt + 1 == max_attempts:
                     raise
                 delay = shared.hf_retry_delay(attempt, cap=120) + random.uniform(0, 2)
-                print(f"transient S3 Reader upload error ({code or status}); retrying in {delay:.1f}s")
+                reason = "timeout" if timeout_error else (code or status)
+                print(f"transient S3 Reader upload error ({reason}); retrying in {delay:.1f}s")
                 time.sleep(delay)
 
     with concurrent.futures.ThreadPoolExecutor(
