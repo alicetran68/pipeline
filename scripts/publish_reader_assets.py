@@ -15,6 +15,7 @@ from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 
 try:
     from .build_reader_assets_index import encode_index
@@ -276,16 +277,19 @@ def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
                     raise S3UploadSizeMismatch(remote_path)
                 return
             except Exception as error:
-                response = getattr(error, "response", {})
+                response = getattr(error, "response", None) or {}
                 status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
                 code = response.get("Error", {}).get("Code")
-                retryable = (isinstance(error, S3UploadSizeMismatch)
-                             or status in {408, 429, 500, 502, 503, 504}
-                             or code in {"SlowDown", "RequestTimeout"})
+                timeout_error = isinstance(error, (ConnectTimeoutError, ReadTimeoutError, TimeoutError))
+                retryable = (timeout_error
+                              or isinstance(error, S3UploadSizeMismatch)
+                              or status in {408, 429, 500, 502, 503, 504}
+                              or code in {"SlowDown", "RequestTimeout"})
                 if not retryable or attempt + 1 == max_attempts:
                     raise
                 delay = shared.hf_retry_delay(attempt, cap=120) + random.uniform(0, 2)
-                reason = "stale object metadata" if isinstance(error, S3UploadSizeMismatch) else (code or status)
+                reason = ("stale object metadata" if isinstance(error, S3UploadSizeMismatch)
+                          else "timeout" if timeout_error else (code or status))
                 print(f"transient S3 Reader upload error ({reason}); retrying in {delay:.1f}s")
                 time.sleep(delay)
 
@@ -360,8 +364,10 @@ def remote_manifest(api: HfApi, repo_id: str, revision: str | None = None) -> di
     if isinstance(api, HfApi):
         try:
             return validate_manifest(read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN")))
-        except (FileNotFoundError, OSError, ValueError):
-            pass
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise RuntimeError(
+                "Reader bucket manifest is unavailable; refusing to publish against a stale dataset manifest"
+            ) from error
     try:
         if not api.file_exists(
                 repo_id=repo_id, repo_type="dataset", filename=MANIFEST_NAME, revision=revision):

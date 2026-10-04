@@ -40,8 +40,8 @@ def remote_manifest(api: HfApi, repo_id: str) -> dict:
     if type(api).__name__ == "HfApi":
         try:
             return validate_manifest(read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN")))
-        except (FileNotFoundError, OSError, ValueError):
-            return empty_manifest()
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise RuntimeError("Reader bucket manifest is unavailable; refusing to scan against a stale dataset manifest") from error
     try:
         if not api.file_exists(repo_id=repo_id, repo_type="dataset", filename=MANIFEST_NAME):
             return empty_manifest()

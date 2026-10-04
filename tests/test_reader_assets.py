@@ -844,6 +844,12 @@ class ScannerTests(unittest.TestCase):
         api.file_exists.side_effect = RepositoryNotFoundError("missing", response=response)
         self.assertEqual(scan_reader_assets.remote_manifest(api, "vomebook/Missing"), reader_assets.empty_manifest())
 
+    def test_bucket_manifest_failure_does_not_fall_back_to_stale_dataset_manifest(self):
+        api = type("HfApi", (), {})()
+        with patch.object(scan_reader_assets, "read_bucket_json", side_effect=OSError("temporary bucket failure")), \
+                self.assertRaisesRegex(RuntimeError, "stale dataset manifest"):
+            scan_reader_assets.remote_manifest(api, "vomebook/Reader-Assets")
+
     def test_reusable_objects_include_ready_files_and_orphans(self):
         manifest = {"version": 1, "files": {
             "book": {"status": "ready", "source_sha256": "a" * 64, "profile": "p1",
@@ -2683,6 +2689,29 @@ class PublicationTests(unittest.TestCase):
             )
         self.assertEqual(fake_client.upload_file.call_count, 2)
         self.assertEqual(fake_client.head_object.call_count, 2)
+
+    def test_s3_reader_upload_retries_multipart_read_timeout(self):
+        from botocore.exceptions import ReadTimeoutError
+
+        fake_client = Mock()
+        fake_client.upload_file.side_effect = [
+            ReadTimeoutError(endpoint_url="https://s3.example", error=TimeoutError()),
+            None,
+        ]
+        fake_client.head_object.return_value = {"ContentLength": 5}
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
+            "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
+            "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",
+        }), patch.object(publish_reader_assets, "_s3_client", return_value=fake_client), \
+                patch.object(publish_reader_assets.time, "sleep"):
+            local = Path(root) / "video.mp4"
+            local.write_bytes(b"asset")
+            publish_reader_assets.s3_upload_artifacts(
+                {"objects/aa/video.mp4": (Path(root), str(local))},
+                "vomebook/pdf-pages",
+            )
+        self.assertEqual(fake_client.upload_file.call_count, 2)
+        fake_client.head_object.assert_called_once_with(Bucket="pdf-pages", Key="objects/aa/video.mp4")
 
     def test_bucket_migration_uploads_reused_dataset_objects_before_marking_bucket(self):
         key = "VoiceOfML/Test\0Saved.mht"
