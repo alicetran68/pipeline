@@ -131,6 +131,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         )
         if (bucket_migrate and not force and existing.get("status") == "ready"
                 and existing.get("bucket") == READER_ASSETS_BUCKET
+                and existing.get("profile") == profile
                 and object_present and chapter_manifest_present
                 and not chapter_bucket_path_missing_prefix):
             continue

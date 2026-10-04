@@ -585,6 +585,25 @@ class ScannerTests(unittest.TestCase):
             self.records[:1], self.revisions, manifest, bucket_migrate=True,
         ), [])
 
+    def test_bucket_migration_replaces_legacy_spreadsheet_page_stream_with_pdf(self):
+        record = {"Repo": "VoiceOfML/Test", "File": "Table", "Extension": "xlsx",
+                  "Folder": [], "Size": 100}
+        key = reader_assets.asset_key(record["Repo"], "Table.xlsx")
+        old_path = "objects/aa/" + "a" * 64 + "/1234567890abcdef/page-manifest.json"
+        manifest = {"version": 1, "files": {key: {
+            "status": "ready", "profile": reader_assets.SPREADSHEET_PAGE_PROFILE,
+            "reader_mode": "pdf", "source_extension": "xlsx",
+            "bucket": reader_assets.READER_ASSETS_BUCKET, "path": old_path,
+        }}}
+        queue = scan_reader_assets.build_queue(
+            [record], self.revisions, manifest, bucket_migrate=True,
+            bucket_objects={old_path},
+        )
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["profile"], "libreoffice-pdf-office-xlsx-v3")
+        self.assertEqual(queue[0]["reader_mode"], "pdf")
+        self.assertEqual(queue[0]["output_name"], "document.pdf")
+
     def test_bucket_migration_requeues_ready_mapping_when_bucket_object_is_missing(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
         manifest = {"version": 1, "files": {key: {
