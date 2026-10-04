@@ -1990,9 +1990,9 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
                 shutil.move(produced, target)
             else:
                 raise
-    elif ext in {"txt", "md", "markdown"}:
+    elif ext in {"txt", "md", "markdown", "vcf", "ini"}:
         shutil.copyfile(source, target)
-    elif ext in {"jpg", "jpeg", "png", "gif", "bmp", "webp"}:
+    elif ext in {"jpg", "jpeg", "png", "gif", "bmp", "webp", "psd"}:
         # Keep the source repository untouched, but serve one CDN-friendly
         # image format from the shared Reader bucket.
         if item.get("reader_mode") == "image" and item.get("output_name", "").endswith(".webp"):
@@ -2065,6 +2065,12 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
         if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
             office_source = work / "source.xls"
             shutil.copyfile(source, office_source)
+        elif ext == "xls" and zipfile.is_zipfile(source):
+            with zipfile.ZipFile(source) as workbook:
+                is_ooxml_workbook = "xl/workbook.xml" in workbook.namelist()
+            if is_ooxml_workbook:
+                office_source = work / "source.xlsx"
+                shutil.copyfile(source, office_source)
         run_checked([
             "libreoffice", "--headless", f"-env:UserInstallation={office_profile}",
             "--convert-to", "pdf", "--outdir", str(out), str(office_source),

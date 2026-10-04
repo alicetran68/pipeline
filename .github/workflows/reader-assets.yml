@@ -177,7 +177,7 @@ jobs:
           case "${EXTENSION}" in
             static)
               if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" || "${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods" ]]; then
-                packages=(libreoffice-calc python3-uno fontconfig fonts-noto-cjk fonts-wqy-microhei)
+                packages=(libreoffice-calc fontconfig fonts-noto-cjk fonts-wqy-microhei)
               else
                 packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei)
               fi
@@ -201,12 +201,6 @@ jobs:
           if ((${#packages[@]})); then
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${packages[@]}"
-          fi
-          if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" || "${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods" ]]; then
-            pip install -r scripts/requirements-spreadsheet-render.txt
-            if ! command -v google-chrome >/dev/null && ! command -v google-chrome-stable >/dev/null; then
-              python -m playwright install --with-deps chromium
-            fi
           fi
           if [[ "${EXTENSION}" == "caj" || "${EXTENSION}" == "kdh" ]]; then
             sudo git clone --filter=blob:none --no-checkout https://github.com/caj2pdf/caj2pdf.git /opt/caj2pdf

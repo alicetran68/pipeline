@@ -26,7 +26,6 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
         key for key, entry in manifest["files"].items()
         if entry.get("status") == "ready"
         and entry.get("source_extension") in SPREADSHEET_EXTENSIONS
-        and entry.get("path", "").endswith("/page-manifest.json")
     }
     for key, entry in manifest["files"].items():
         status = entry.get("status")

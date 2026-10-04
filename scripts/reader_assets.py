@@ -19,6 +19,7 @@ MANIFEST_NAME = "manifest.json"
 CHM_CHAPTER_SPLIT_BYTES = 16 * 1024 * 1024
 EPUB_CHAPTER_BUNDLE_DIR = "epub-chapters"
 EPUB_CHAPTER_PROFILE = "epub-chapters-v8-bucket"
+# Retained for validation of already-published image-stream manifests.
 SPREADSHEET_PAGE_PROFILE = "libreoffice-html-pages-spreadsheet-v6"
 SPREADSHEET_EXTENSIONS = frozenset({"xls", "xlsx", "csv", "ods"})
 NATIVE_MEDIA_PROFILE = "native-media-cdn-v1"
@@ -40,6 +41,9 @@ BUCKET_NATIVE_EXTENSIONS = {
     "gif": ("native-image-webp-v1", "image", "document.webp"),
     "bmp": ("native-image-webp-v1", "image", "document.webp"),
     "webp": ("native-image-webp-v1", "image", "document.webp"),
+    "psd": ("native-image-webp-v1", "image", "document.webp"),
+    "vcf": ("native-text-v1", "text", "document.txt"),
+    "ini": ("native-text-v1", "text", "document.txt"),
 }
 CONVERTIBLE_EXTENSIONS = {
     "doc": ("libreoffice-docx-v2", "docx", "document.docx"),
@@ -269,8 +273,6 @@ def bucket_conversion_contract(repo: str, path: str, extension: str, source_byte
         return BUCKET_NATIVE_EXTENSIONS[extension]
     if extension in BUCKET_NATIVE_MEDIA_EXTENSIONS:
         return BUCKET_NATIVE_MEDIA_EXTENSIONS[extension]
-    if extension in {"xls", "xlsx", "csv", "ods"}:
-        return (SPREADSHEET_PAGE_PROFILE, "pdf", "page-manifest.json")
     contract = source_conversion_contract(repo, path, extension, source_bytes)
     if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub"}:
         return contract

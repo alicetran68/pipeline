@@ -12,7 +12,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 try:
     from .reader_assets import (
         EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
-        SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
+        asset_key, bucket_conversion_contract, canonical_json,
         conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
@@ -22,7 +22,7 @@ try:
 except ImportError:
     from reader_assets import (
         EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
-        SPREADSHEET_PAGE_PROFILE, asset_key, bucket_conversion_contract, canonical_json,
+        asset_key, bucket_conversion_contract, canonical_json,
         conversion_dependencies, decode_search_payload,
         empty_manifest, load_json, needs_epub_chapters, relative_path, reusable_object_key,
         source_conversion_contract, source_url, validate_manifest,
@@ -107,7 +107,6 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
                     source_conversion_contract(source_repo, path, ext, int(record.get("Size") or 0)))
         if contract is None:
             continue
-        spreadsheet_pages = contract[0] == SPREADSHEET_PAGE_PROFILE
         revision = str(revisions.get(source_repo) or "")
         if not revision:
             continue
@@ -117,6 +116,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         if shard_for_key(key, shard_count) != shard_index:
             continue
         profile, reader_mode, output_name = contract
+        spreadsheet_pages = output_name == "page-manifest.json"
         existing = files.get(key, {})
         chapter_path = existing.get("chapter_manifest") if isinstance(existing, dict) else None
         chapter_bucket_path_missing_prefix = (
@@ -173,13 +173,11 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
             "reader_mode": reader_mode, "output_name": output_name,
             "conversion_dependencies": conversion_dependencies(ext, reader_mode),
         }
-        if bucket_migrate and reader_mode == "pdf":
-            if spreadsheet_pages:
-                item["page_stream"] = True
         selected.append(item)
     priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                   "doc": 3, "docx": 3, "htm": 3, "html": 3, "txt": 3, "md": 3, "markdown": 3,
-                  "jpg": 3, "jpeg": 3, "png": 3, "gif": 3, "bmp": 3, "webp": 3, "caj": 3, "kdh": 3,
+                   "jpg": 3, "jpeg": 3, "png": 3, "gif": 3, "bmp": 3, "webp": 3, "psd": 3,
+                   "vcf": 3, "ini": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
                   "ape": 3, "wma": 3, "amr": 3, "asx": 4,
