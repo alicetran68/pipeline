@@ -2665,6 +2665,25 @@ class PublicationTests(unittest.TestCase):
                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         fake_client.head_object.assert_called_once_with(Bucket="pdf-pages", Key="objects/aa/document.docx")
 
+    def test_s3_reader_upload_retries_stale_size_after_overwrite(self):
+        fake_client = Mock()
+        fake_client.head_object.side_effect = [
+            {"ContentLength": 4}, {"ContentLength": 5},
+        ]
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
+            "HF_S3_ACCESS_KEY_ID": "key", "HF_S3_SECRET_ACCESS_KEY": "secret",
+            "HF_S3_NAMESPACE": "vomebook", "HF_S3_UPLOAD_WORKERS": "1",
+        }), patch.object(publish_reader_assets, "_s3_client", return_value=fake_client), \
+                patch.object(publish_reader_assets.time, "sleep"):
+            local = Path(root) / "lifecycle.json"
+            local.write_bytes(b"asset")
+            publish_reader_assets.s3_upload_artifacts(
+                {"reader-index/reader_lifecycle.json": (Path(root), str(local))},
+                "vomebook/pdf-pages",
+            )
+        self.assertEqual(fake_client.upload_file.call_count, 2)
+        self.assertEqual(fake_client.head_object.call_count, 2)
+
     def test_bucket_migration_uploads_reused_dataset_objects_before_marking_bucket(self):
         key = "VoiceOfML/Test\0Saved.mht"
         result = {

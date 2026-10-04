@@ -45,6 +45,10 @@ BUCKET_READER_MODES = {"docx", "html", "text", "markdown", "image", "foliate", "
 EBOOK_CHAPTERS_PREFIX = "ebook-chapters/"
 
 
+class S3UploadSizeMismatch(RuntimeError):
+    """The upload succeeded but HEAD still returned stale object metadata."""
+
+
 def bucket_chapter_path(path: str) -> str:
     """Store chapter bundles under the namespace accepted by Reader APIs."""
     return path if path.startswith(EBOOK_CHAPTERS_PREFIX) else EBOOK_CHAPTERS_PREFIX + path
@@ -266,17 +270,23 @@ def s3_upload_artifacts(artifacts: dict[str, tuple[Path, str]], bucket: str,
                 )
                 uploaded = client.head_object(Bucket=bucket_name, Key=remote_path)
                 if uploaded.get("ContentLength") != expected_bytes:
-                    raise RuntimeError(f"uploaded Reader object size mismatch: {remote_path}")
+                    # HF S3 can briefly return the previous object metadata
+                    # immediately after an overwrite. Treat that as transient
+                    # and verify again after re-uploading with backoff.
+                    raise S3UploadSizeMismatch(remote_path)
                 return
             except Exception as error:
                 response = getattr(error, "response", {})
                 status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
                 code = response.get("Error", {}).get("Code")
-                retryable = status in {408, 429, 500, 502, 503, 504} or code in {"SlowDown", "RequestTimeout"}
+                retryable = (isinstance(error, S3UploadSizeMismatch)
+                             or status in {408, 429, 500, 502, 503, 504}
+                             or code in {"SlowDown", "RequestTimeout"})
                 if not retryable or attempt + 1 == max_attempts:
                     raise
                 delay = shared.hf_retry_delay(attempt, cap=120) + random.uniform(0, 2)
-                print(f"transient S3 Reader upload error ({code or status}); retrying in {delay:.1f}s")
+                reason = "stale object metadata" if isinstance(error, S3UploadSizeMismatch) else (code or status)
+                print(f"transient S3 Reader upload error ({reason}); retrying in {delay:.1f}s")
                 time.sleep(delay)
 
     with concurrent.futures.ThreadPoolExecutor(
