@@ -734,6 +734,8 @@ def publish_bucket_bundle(api: HfApi, repo_id: str, bundle: Path, data: dict,
                 profile = str(record.get("profile") or "")
                 if profile.startswith("native-swf-"):
                     reader_mode = "swf"
+                elif profile == "native-media-cdn-v1":
+                    reader_mode = "audio" if Path(record.get("path", "")).name.startswith("audio.") else "video"
                 elif profile.startswith("ffmpeg-audio-"):
                     reader_mode = "audio"
                 elif profile.startswith("ffmpeg-video-"):
