@@ -177,7 +177,7 @@ jobs:
           case "${EXTENSION}" in
             static)
               if [[ "${INPUT_EXTENSION}" == "xls" || "${INPUT_EXTENSION}" == "xlsx" || "${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods" ]]; then
-                packages=(libreoffice-calc fontconfig fonts-noto-cjk fonts-wqy-microhei)
+                packages=(libreoffice-calc python3-uno fontconfig fonts-noto-cjk fonts-wqy-microhei)
               else
                 packages=(calibre libreoffice qpdf ghostscript poppler-utils p7zip-full fontconfig fonts-noto-cjk fonts-wqy-microhei)
               fi

@@ -238,7 +238,7 @@ class ReaderAssetContractTests(unittest.TestCase):
         self.assertEqual({ext: reader_assets.conversion_contract(ext) for ext in expected}, expected)
         self.assertEqual(
             reader_assets.bucket_conversion_contract("repo", "table.xlsx", "xlsx"),
-            reader_assets.source_conversion_contract("repo", "table.xlsx", "xlsx"),
+            (reader_assets.SPREADSHEET_HTML_PROFILE, "html", "document.html"),
         )
         for extension, mode, output in (
             ("mp3", "audio", "audio.mp3"), ("wav", "audio", "audio.wav"),
@@ -253,7 +253,7 @@ class ReaderAssetContractTests(unittest.TestCase):
         for extension in ("xls", "xlsx", "csv", "ods"):
             self.assertEqual(
                 reader_assets.bucket_conversion_contract("repo", f"table.{extension}", extension),
-                reader_assets.source_conversion_contract("repo", f"table.{extension}", extension),
+                (reader_assets.SPREADSHEET_HTML_PROFILE, "html", "document.html"),
             )
 
     def test_large_docx_keeps_native_contract(self):
@@ -520,7 +520,7 @@ class ScannerTests(unittest.TestCase):
               ("txt", "text", "document.txt"), ("mht", "html", "document.html")],
         )
 
-    def test_bucket_migration_queues_xlsx_as_vector_pdf(self):
+    def test_bucket_migration_queues_xlsx_as_native_html(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Table", "Extension": "xlsx",
                   "Folder": [], "Size": 100}
         queue = scan_reader_assets.build_queue(
@@ -528,21 +528,21 @@ class ScannerTests(unittest.TestCase):
             bucket_migrate=True,
         )
         self.assertEqual(len(queue), 1)
-        self.assertEqual(queue[0]["reader_mode"], "pdf")
-        self.assertEqual(queue[0]["profile"], "libreoffice-pdf-office-xlsx-v3")
-        self.assertEqual(queue[0]["output_name"], "document.pdf")
+        self.assertEqual(queue[0]["reader_mode"], "html")
+        self.assertEqual(queue[0]["profile"], reader_assets.SPREADSHEET_HTML_PROFILE)
+        self.assertEqual(queue[0]["output_name"], "document.html")
         self.assertNotIn("page_stream", queue[0])
 
-    def test_bucket_migration_queues_csv_as_vector_pdf(self):
+    def test_bucket_migration_queues_csv_as_native_html(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Data", "Extension": "csv",
                   "Folder": [], "Size": 100}
         queue = scan_reader_assets.build_queue(
             [record], self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
         )
         self.assertEqual(len(queue), 1)
-        self.assertEqual(queue[0]["profile"], "libreoffice-pdf-office-v2")
-        self.assertEqual(queue[0]["reader_mode"], "pdf")
-        self.assertEqual(queue[0]["output_name"], "document.pdf")
+        self.assertEqual(queue[0]["profile"], reader_assets.SPREADSHEET_HTML_PROFILE)
+        self.assertEqual(queue[0]["reader_mode"], "html")
+        self.assertEqual(queue[0]["output_name"], "document.html")
         self.assertNotIn("page_stream", queue[0])
 
     def test_bucket_migration_queues_native_media_and_keeps_conversion_fallback(self):
@@ -600,9 +600,9 @@ class ScannerTests(unittest.TestCase):
             bucket_objects={old_path},
         )
         self.assertEqual(len(queue), 1)
-        self.assertEqual(queue[0]["profile"], "libreoffice-pdf-office-xlsx-v3")
-        self.assertEqual(queue[0]["reader_mode"], "pdf")
-        self.assertEqual(queue[0]["output_name"], "document.pdf")
+        self.assertEqual(queue[0]["profile"], reader_assets.SPREADSHEET_HTML_PROFILE)
+        self.assertEqual(queue[0]["reader_mode"], "html")
+        self.assertEqual(queue[0]["output_name"], "document.html")
 
     def test_bucket_migration_requeues_ready_mapping_when_bucket_object_is_missing(self):
         key = reader_assets.asset_key("VoiceOfML/Test", "A/Book.docx")
@@ -1242,25 +1242,25 @@ class ConverterTests(unittest.TestCase):
     def test_encrypted_ole_xlsx_without_password_fails_before_libreoffice(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.xlsx", work / "document.pdf"
+            source, target = work / "source.xlsx", work / "document.html"
             source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
             office = Mock()
             office.is_encrypted.return_value = True
             with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": ""}), \
                     patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
-                    patch.object(convert_reader_assets, "run_checked") as convert:
+                    patch.object(convert_reader_assets, "convert_spreadsheet_to_html") as convert:
                 with self.assertRaisesRegex(RuntimeError, "encrypted spreadsheet requires"):
                     convert_reader_assets.convert_file(
-                        {"extension": "xlsx", "profile": "libreoffice-pdf-office-xlsx-v3",
-                         "reader_mode": "pdf", "output_name": "document.pdf"},
+                        {"extension": "xlsx", "profile": reader_assets.SPREADSHEET_HTML_PROFILE,
+                         "reader_mode": "html", "output_name": "document.html"},
                         source, target, work,
                     )
             convert.assert_not_called()
 
-    def test_encrypted_ole_xlsx_is_decrypted_before_pdf_export(self):
+    def test_encrypted_ole_xlsx_is_decrypted_before_html_export(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "source.xlsx", work / "document.pdf"
+            source, target = work / "source.xlsx", work / "document.html"
             source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"encrypted")
             office = Mock()
             office.is_encrypted.return_value = True
@@ -1269,22 +1269,17 @@ class ConverterTests(unittest.TestCase):
                 target_file.write(b"clear workbook")
 
             office.decrypt.side_effect = decrypt
-            def export_pdf(command, **_kwargs):
-                self.assertEqual(command[command.index("--convert-to") + 1], "pdf")
-                (work / "office-pdf" / "decrypted.pdf").write_bytes(b"%PDF-decrypted")
             with patch.dict(convert_reader_assets.os.environ, {"READER_CONVERSION_PASSWORD": "secret"}), \
                     patch.dict("sys.modules", {"msoffcrypto": Mock(OfficeFile=Mock(return_value=office))}), \
-                    patch.object(convert_reader_assets, "run_checked", side_effect=export_pdf) as convert:
+                    patch.object(convert_reader_assets, "convert_spreadsheet_to_html") as convert:
                 convert_reader_assets.convert_file(
-                    {"extension": "xlsx", "profile": "libreoffice-pdf-office-xlsx-v3",
-                     "reader_mode": "pdf", "output_name": "document.pdf"},
+                    {"extension": "xlsx", "profile": reader_assets.SPREADSHEET_HTML_PROFILE,
+                     "reader_mode": "html", "output_name": "document.html"},
                     source, target, work,
                 )
-            command = convert.call_args.args[0]
-            decrypted = Path(command[-1])
+            decrypted = convert.call_args.args[0]
             self.assertEqual(decrypted.name, "decrypted.xlsx")
             self.assertEqual(decrypted.read_bytes(), b"clear workbook")
-            self.assertEqual(target.read_bytes(), b"%PDF-decrypted")
             office.load_key.assert_called_once_with(password="secret")
 
     def test_mht_conversion_reuses_mhtml_sanitizer(self):
@@ -1902,15 +1897,15 @@ aW1hZ2U=
             with self.assertRaisesRegex(RuntimeError, "page manifest is invalid"):
                 convert_reader_assets.validate_page_manifest(manifest)
 
-    def test_spreadsheet_pdf_overrides_sampled_pdf_and_ocr_renderings(self):
+    def test_spreadsheet_html_overrides_sampled_pdf_and_ocr_renderings(self):
         key = "VoiceOfML/Test\0table.xlsx"
         source = "objects/aa/" + "a" * 64
-        spreadsheet_path = source + "/libreoffice-pdf-office-xlsx-v3/document.pdf"
+        spreadsheet_path = source + "/libreoffice-native-html-spreadsheet-v1/document.html"
         pdf_path = source + "/old-pdf/pages/page-manifest.json"
         ocr_path = source + "/old-ocr/pages/page-manifest.json"
         manifest = {"files": {key: {
-            "status": "ready", "reader_mode": "pdf", "source_extension": "xlsx",
-            "profile": "libreoffice-pdf-office-xlsx-v3", "path": spreadsheet_path,
+            "status": "ready", "reader_mode": "html", "source_extension": "xlsx",
+            "profile": reader_assets.SPREADSHEET_HTML_PROFILE, "path": spreadsheet_path,
         }}}
         pdf_manifest = {"files": {key: {
             "status": "ready", "strategy": "sampled-webp",
@@ -1926,7 +1921,7 @@ aW1hZ2U=
             manifest, pdf_manifest=pdf_manifest, ocr_manifest=ocr_manifest,
         )["f"][key]
         self.assertEqual(entry["p"], spreadsheet_path)
-        self.assertEqual(entry["m"], "p")
+        self.assertEqual(entry["m"], "h")
 
     def test_spreadsheet_text_inventory_repairs_common_utf8_mojibake(self):
         self.assertIn("中国海军", convert_reader_assets.spreadsheet_text_variants("ä¸­å½æµ·å"))
@@ -2077,62 +2072,98 @@ aW1hZ2U=
                 self.assertEqual(document.xpath("//style/text()"), ["td{width:400px}"])
         self.assertEqual(rows, [f"row-{index}" for index in range(5)])
 
-    def test_xlsx_bucket_contract_uses_zoomable_vector_pdf(self):
-        self.assertEqual(reader_assets.bucket_conversion_contract(
-            "repo", "table.xlsx", "xlsx",
-        ), ("libreoffice-pdf-office-xlsx-v3", "pdf", "document.pdf"))
+    def test_spreadsheet_export_keeps_native_tables_and_embeds_charts(self):
+        from PIL import Image
+
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
-            source, target = work / "sample.xlsx", work / "document.pdf"
+            source = work / "sample.xlsx"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("xl/workbook.xml", '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" r:id="r1"/><sheet name="Details" r:id="r2"/></sheets></workbook>')
+                archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Target="worksheets/sheet2.xml"/></Relationships>')
+                archive.writestr("xl/sharedStrings.xml", '<sst><si><t>Year</t></si><si><t>Value</t></si><si><t>完整表格</t></si><si><t>数据</t></si></sst>')
+                archive.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/worksheets/sheet2.xml", '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>2</v></c><c r="B1" t="s"><v>3</v></c></row></sheetData></worksheet>')
+                archive.writestr("xl/charts/chart1.xml", "<chart/>")
+                archive.writestr("xl/media/image1.png", b"image")
+
+            def export_html(command, **_kwargs):
+                output = Path(command[-1])
+                first = output / "sheet-0001" / "sheet.html"
+                first.parent.mkdir(parents=True)
+                first.write_text(
+                    '<html><head><style>td{border:1px solid #333}</style></head><body>'
+                    '<table><tr><td>Year</td><td>Value</td></tr><tr><td>2024</td><td>10</td></tr>'
+                    '</table><img src="chart.png"><img src="embedded.png"></body></html>', encoding="utf-8",
+                )
+                Image.new("RGB", (16, 12), "red").save(first.parent / "chart.png")
+                Image.new("RGB", (8, 8), "blue").save(first.parent / "embedded.png")
+                second = output / "sheet-0002" / "sheet.html"
+                second.parent.mkdir()
+                second.write_text(
+                    '<html><body><table><tr><td>完整表格</td><td>数据</td></tr></table></body></html>',
+                    encoding="utf-8",
+                )
+
+            target = work / "bundle/document.html"
+            target.parent.mkdir()
+            item = {"extension": "xlsx", "profile": reader_assets.SPREADSHEET_HTML_PROFILE}
+            with patch.object(convert_reader_assets, "run_checked", side_effect=export_html) as run:
+                convert_reader_assets.convert_spreadsheet_to_html(source, target, work, item)
+            self.assertTrue(run.call_args.args[0][1].endswith("render_spreadsheet_html.py"))
+            document = target.read_text(encoding="utf-8")
+            self.assertIn("<table", document)
+            self.assertIn("2024", document)
+            self.assertIn("完整表格", document)
+            self.assertIn("Summary", document)
+            self.assertIn("Details", document)
+            self.assertEqual(document.count("data:image/png;base64,"), 2)
+
+    def test_xlsx_bucket_contract_uses_native_html(self):
+        self.assertEqual(reader_assets.bucket_conversion_contract(
+            "repo", "table.xlsx", "xlsx",
+        ), (reader_assets.SPREADSHEET_HTML_PROFILE, "html", "document.html"))
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            source, target = work / "sample.xlsx", work / "document.html"
             source.write_bytes(b"xlsx workbook")
-
-            def export_pdf(command, **_kwargs):
-                self.assertEqual(command[command.index("--convert-to") + 1], "pdf")
-                (work / "office-pdf" / "sample.pdf").write_bytes(b"%PDF-vector-table")
-
-            with patch.object(convert_reader_assets, "run_checked", side_effect=export_pdf) as run:
+            with patch.object(convert_reader_assets, "convert_spreadsheet_to_html") as convert:
                 convert_reader_assets.convert_file({
-                    "extension": "xlsx", "profile": "libreoffice-pdf-office-xlsx-v3",
-                    "reader_mode": "pdf", "output_name": "document.pdf",
+                    "extension": "xlsx", "profile": reader_assets.SPREADSHEET_HTML_PROFILE,
+                    "reader_mode": "html", "output_name": "document.html",
                 }, source, target, work)
-            run.assert_called_once()
-            self.assertEqual(target.read_bytes(), b"%PDF-vector-table")
-            self.assertFalse((work / "pages").exists())
+            convert.assert_called_once()
 
-    def test_mislabeled_ole_xlsx_uses_legacy_workbook_extension_for_pdf_export(self):
+    def test_mislabeled_ole_xlsx_uses_legacy_workbook_extension_for_html_export(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source = work / "source.xlsx"
             source.write_bytes(convert_reader_assets.OLE_SIGNATURE + b"legacy workbook")
-            def export_pdf(command, **_kwargs):
-                self.assertTrue(str(command[-1]).endswith("source.xls"))
-                (work / "office-pdf" / "source.pdf").write_bytes(b"%PDF-vector")
-            with patch.object(convert_reader_assets, "run_checked", side_effect=export_pdf) as convert:
+            with patch.object(convert_reader_assets, "convert_spreadsheet_to_html") as convert:
                 convert_reader_assets.convert_file(
-                    {"extension": "xlsx", "profile": "libreoffice-pdf-office-xlsx-v3",
-                     "reader_mode": "pdf", "output_name": "document.pdf"},
-                    source, work / "document.pdf", work,
+                    {"extension": "xlsx", "profile": reader_assets.SPREADSHEET_HTML_PROFILE,
+                     "reader_mode": "html", "output_name": "document.html"},
+                    source, work / "document.html", work,
                 )
-            self.assertEqual(convert.call_count, 1)
-            self.assertEqual((work / "document.pdf").read_bytes(), b"%PDF-vector")
+            rendered_source = convert.call_args.args[0]
+            self.assertEqual(rendered_source.suffix, ".xls")
+            self.assertEqual(rendered_source.read_bytes(), source.read_bytes())
 
-    def test_xls_extension_with_ooxml_content_uses_xlsx_extension_for_pdf_export(self):
+    def test_xls_extension_with_ooxml_content_uses_xlsx_extension_for_html_export(self):
         with tempfile.TemporaryDirectory() as root:
             work = Path(root)
             source = work / "source.xls"
             with zipfile.ZipFile(source, "w") as archive:
                 archive.writestr("xl/workbook.xml", "<workbook/>")
-            def export_pdf(command, **_kwargs):
-                self.assertTrue(str(command[-1]).endswith("source.xlsx"))
-                (work / "office-pdf" / "source.pdf").write_bytes(b"%PDF-vector")
-            with patch.object(convert_reader_assets, "run_checked", side_effect=export_pdf) as convert:
+            with patch.object(convert_reader_assets, "convert_spreadsheet_to_html") as convert:
                 convert_reader_assets.convert_file(
-                    {"extension": "xls", "profile": "libreoffice-pdf-office-v2",
-                     "reader_mode": "pdf", "output_name": "document.pdf"},
-                    source, work / "document.pdf", work,
+                    {"extension": "xls", "profile": reader_assets.SPREADSHEET_HTML_PROFILE,
+                     "reader_mode": "html", "output_name": "document.html"},
+                    source, work / "document.html", work,
                 )
-            self.assertEqual(convert.call_count, 1)
-            self.assertEqual((work / "document.pdf").read_bytes(), b"%PDF-vector")
+            rendered_source = convert.call_args.args[0]
+            self.assertEqual(rendered_source.suffix, ".xlsx")
+            self.assertEqual(rendered_source.read_bytes(), source.read_bytes())
 
     def test_epub_content_validation_rejects_missing_image_resources(self):
         with tempfile.TemporaryDirectory() as root:
@@ -3339,7 +3370,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("requirements-spreadsheet-render.txt", workflow)
         self.assertNotIn("playwright install --with-deps chromium", workflow)
         self.assertIn('"${INPUT_EXTENSION}" == "csv" || "${INPUT_EXTENSION}" == "ods"', workflow)
-        self.assertIn("libreoffice-calc fontconfig", workflow)
+        self.assertIn("libreoffice-calc python3-uno fontconfig", workflow)
         self.assertNotIn("bucket_pdf_staging", workflow)
         self.assertIn("ps) packages=(ghostscript poppler-utils)", workflow)
         self.assertIn("caj|kdh) packages=(git mupdf-tools poppler-utils", workflow)

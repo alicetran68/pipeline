@@ -42,12 +42,14 @@ from PIL import Image, ImageSequence
 try:
     from .reader_assets import (
         EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE,
+        SPREADSHEET_HTML_PROFILE,
         PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
 except ImportError:
     from reader_assets import (
         EPUB_CHAPTER_BUNDLE_DIR, EPUB_CHAPTER_PROFILE, GBK_PDF_CONTRACT, NATIVE_MEDIA_PROFILE,
+        SPREADSHEET_HTML_PROFILE,
         PASSWORD_RE, canonical_json, load_json, needs_epub_chapters,
         object_profile_path, reusable_object_key, source_password, validate_storage_path,
     )
@@ -1530,6 +1532,78 @@ def convert_spreadsheet_to_pages(source: Path, target: Path, work: Path, item: d
     }, pretty=True))
 
 
+def convert_spreadsheet_to_html(source: Path, target: Path, work: Path, item: dict) -> None:
+    """Publish each worksheet as selectable HTML, embedding its local chart assets."""
+    output = work / "spreadsheet-html"
+    output.mkdir()
+    helper = Path(__file__).with_name("render_spreadsheet_html.py")
+    run_checked([
+        "/usr/bin/python3", str(helper), str(source), str(output),
+    ], timeout_seconds=SPREADSHEET_RENDER_COMMAND_TIMEOUT_SECONDS)
+    html_pages = sorted(output.glob("sheet-*/sheet.html"))
+    if not html_pages:
+        raise RuntimeError("LibreOffice produced no spreadsheet worksheet HTML")
+
+    expected_sheets, expected_values, expected_charts, expected_images = spreadsheet_source_inventory(
+        source, item.get("extension", source.suffix.lower().lstrip(".")),
+    )
+    if len(html_pages) < len(expected_sheets):
+        raise RuntimeError("spreadsheet HTML export omitted worksheet pages")
+    if len(expected_values) >= 50_000 and expected_charts == 0 and expected_images == 0:
+        html_pages = split_spreadsheet_html_rows(html_pages, work / "spreadsheet-html-chunks")
+
+    exported_html = "\n".join(page.read_text(encoding="utf-8", errors="replace") for page in html_pages)
+    visible_html = spreadsheet_text_key(extract_html_text(exported_html))
+    missing_values = [value for value in expected_values
+                      if not spreadsheet_text_present(value, visible_html)]
+    if missing_values:
+        diagnostics = [len(spreadsheet_text_key(value)) for value in missing_values[:8]]
+        raise RuntimeError(
+            f"spreadsheet HTML export omitted {len(missing_values)} non-empty cell value(s); "
+            f"normalized cell lengths: {diagnostics!r}"
+        )
+    exported_images = sum(len(image_sources(page.read_text(encoding="utf-8", errors="replace")))
+                          for page in html_pages)
+    if exported_images < expected_charts + expected_images:
+        raise RuntimeError("spreadsheet HTML export omitted chart or image objects")
+
+    styles = []
+    sections = []
+    for index, page_path in enumerate(html_pages, 1):
+        inlined = inline_local_html_resources(
+            page_path.read_text(encoding="utf-8", errors="replace"), output, page_path.parent,
+        )
+        document = lxml_html.document_fromstring(inlined)
+        for style in document.xpath("//head/style"):
+            if style.text:
+                styles.append(style.text)
+        body = document.find("body")
+        if body is None:
+            raise RuntimeError(f"spreadsheet worksheet {index} has no HTML body")
+        contents = (body.text or "") + "".join(
+            lxml_html.tostring(child, encoding="unicode", method="html") for child in body
+        )
+        match = re.match(r"sheet-([0-9]+)", page_path.stem)
+        sheet_index = int(match.group(1)) - 1 if match else index - 1
+        title = expected_sheets[sheet_index] if sheet_index < len(expected_sheets) else f"Sheet {index}"
+        sections.append(
+            f'<section class="reader-spreadsheet-sheet"><h2>{html.escape(title)}</h2>{contents}</section>'
+        )
+    target.write_text(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>"
+        "html,body{min-height:100%;margin:0;background:#fff;color:#16191c}"
+        "body{box-sizing:border-box;width:max-content;min-width:100%;padding:12px;"
+        "font:14px/1.35 Arial,'Noto Sans',sans-serif}"
+        ".reader-spreadsheet-sheet{width:max-content;min-width:100%;margin:0 0 24px}"
+        ".reader-spreadsheet-sheet h2{position:sticky;left:0;width:max-content;"
+        "margin:0 0 8px;font-size:16px}"
+        ".reader-spreadsheet-sheet img,.reader-spreadsheet-sheet svg{max-width:none;height:auto}"
+        f"</style><style>{' '.join(styles)}</style></head><body>"
+        + "".join(sections) + "</body></html>",
+        encoding="utf-8",
+    )
+
+
 def render_spreadsheet_html(html_pages: list[Path], output: Path) -> list[Path]:
     try:
         from playwright.sync_api import sync_playwright
@@ -1845,7 +1919,7 @@ def validate_mhtml_content(path: Path) -> None:
 def validate_reader_content(path: Path, item: dict, work: Path) -> None:
     mode = item["reader_mode"]
     if mode == "pdf":
-        if item.get("output_name") == "page-manifest.json":
+        if item.get("profile") == SPREADSHEET_HTML_PROFILE:
             validate_page_manifest(path)
         else:
             validate_pdf_content(path, work)
@@ -1870,7 +1944,12 @@ def convert_reader_image(source: Path, target: Path) -> None:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", Image.DecompressionBombWarning)
                 with Image.open(source) as image:
-                    image.seek(0)
+                    # Some PSDs expose a broken layer sequence even though
+                    # their first composite frame is readable.
+                    try:
+                        image.seek(0)
+                    except EOFError:
+                        pass
                     image.thumbnail(
                         (MAX_READER_IMAGE_EDGE, MAX_READER_IMAGE_EDGE), Image.Resampling.LANCZOS,
                     )
@@ -2044,7 +2123,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
                     raise
                 time.sleep(2)
     elif ext in {"ppt", "pptx", "pps", "odp", "xls", "xlsx", "csv", "ods", "wps"}:
-        if item.get("output_name") == "page-manifest.json":
+        if item.get("profile") == SPREADSHEET_HTML_PROFILE:
             spreadsheet_source = source
             if ext == "xlsx" and source.read_bytes()[:8] == OLE_SIGNATURE:
                 spreadsheet_source = work / "spreadsheet-source.xls"
@@ -2055,9 +2134,7 @@ def convert_file(item: dict, source: Path, target: Path, work: Path,
                 if is_ooxml_workbook:
                     spreadsheet_source = work / "spreadsheet-source.xlsx"
                     shutil.copyfile(source, spreadsheet_source)
-            convert_spreadsheet_to_pages(
-                spreadsheet_source, target, work, item, source_sha256, object_path,
-            )
+            convert_spreadsheet_to_html(spreadsheet_source, target, work, item)
             return
         out = work / "office-pdf"
         out.mkdir()
