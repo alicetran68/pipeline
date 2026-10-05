@@ -7,7 +7,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
+import subprocess
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -24,6 +24,7 @@ except ImportError:
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 ROOT = "chapters/ebook/epub"
+SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--max-source-bytes", type=int, default=0)
+    parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
@@ -45,10 +47,10 @@ def download(url: str, target: Path, token: str | None) -> None:
         target.write_bytes(response.read())
 
 
-def existing_index(bucket: str, token: str | None) -> dict:
+def existing_index(bucket: str, token: str | None, root: str) -> dict:
     try:
         fs = HfFileSystem(token=token)
-        with fs.open(f"hf://buckets/{bucket}/{ROOT}/index.json", "rb") as stream:
+        with fs.open(f"hf://buckets/{bucket}/{root}/index.json", "rb") as stream:
             payload = json.loads(stream.read().decode("utf-8"))
         if isinstance(payload, dict) and isinstance(payload.get("files"), list):
             return payload
@@ -57,13 +59,13 @@ def existing_index(bucket: str, token: str | None) -> dict:
     return {"version": 1, "kind": "ebook-chapter-stream-index", "files": []}
 
 
-def select_records(path: Path, revisions: dict, max_bytes: int) -> list[dict]:
+def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
     records = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     selected = []
     for record in records:
         extension = str(record.get("Extension") or "").lower().lstrip(".")
         size = int(record.get("Size") or 0)
-        if extension != "epub" or (max_bytes and size > max_bytes):
+        if extension != extension_filter or (max_bytes and size > max_bytes):
             continue
         repo = str(record.get("Repo") or "")
         revision = str(revisions.get(repo) or "")
@@ -75,20 +77,26 @@ def select_records(path: Path, revisions: dict, max_bytes: int) -> list[dict]:
 
 def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[dict, dict[str, str]]:
     work.mkdir(parents=True, exist_ok=True)
-    source = work / "source.epub"
+    extension = item["extension"]
+    source = work / f"source.{extension}"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_bytes = source.read_bytes()
     source_digest = hashlib.sha256(source_bytes).hexdigest()
+    chapter_source = source
+    if extension != "epub":
+        chapter_source = work / "chapter-source.epub"
+        subprocess.run(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
+                       check=True, timeout=600)
     bundle = work / "bundle"
-    manifest = build_bundle(source, bundle)
+    manifest = build_bundle(chapter_source, bundle)
     version = bundle_version(bundle)
-    root = f"{ROOT}/{source_digest}/{version}"
+    root = f"chapters/ebook/{extension}/{source_digest}/{version}"
     uploads = {}
     for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
         uploads[f"{root}/{path.relative_to(bundle).as_posix()}"] = str(path)
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
-        "source_revision": item["revision"], "source_sha256": source_digest,
+        "source_extension": extension, "source_revision": item["revision"], "source_sha256": source_digest,
         "source_bytes": len(source_bytes), "mode": "chapter-stream", "bucket": bucket,
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
@@ -101,10 +109,14 @@ def main() -> int:
     if args.limit < 0 or args.max_source_bytes < 0:
         raise ValueError("limit and max-source-bytes must be non-negative")
     token = os.environ.get("HF_TOKEN")
+    extension = args.extension.lower().lstrip(".")
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"unsupported ebook extension: {extension}")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
-    previous = existing_index(args.bucket, token)
+    root_prefix = f"chapters/ebook/{extension}"
+    previous = existing_index(args.bucket, token, root_prefix)
     completed = {entry.get("key"): entry.get("source_revision") for entry in previous.get("files", []) if isinstance(entry, dict)}
-    selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes)
+    selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     if args.limit:
         selected = selected[:args.limit]
@@ -115,6 +127,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reader-epub-") as directory:
         root = Path(directory)
         for index, item in enumerate(selected):
+            item["extension"] = extension
             entry, files = build_one(item, root / str(index), token, args.bucket)
             entries.append(entry)
             uploads.update(files)
@@ -122,7 +135,7 @@ def main() -> int:
         merged.update({entry["key"]: entry for entry in entries})
         index_file = root / "index.json"
         index_file.write_text(json.dumps({"version": 1, "kind": "ebook-chapter-stream-index", "files": [merged[key] for key in sorted(merged)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        uploads[f"{ROOT}/index.json"] = str(index_file)
+        uploads[f"{root_prefix}/index.json"] = str(index_file)
         print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s)")
         if args.apply:
             batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
