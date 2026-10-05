@@ -22,7 +22,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-prune
   cancel-in-progress: false
   queue: max
 

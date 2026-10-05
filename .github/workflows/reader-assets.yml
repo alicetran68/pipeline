@@ -62,7 +62,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-general
   cancel-in-progress: false
   queue: max
 
@@ -70,6 +70,10 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
     outputs:
       extension: ${{ steps.scan.outputs.extension }}
       count: ${{ steps.scan.outputs.count }}

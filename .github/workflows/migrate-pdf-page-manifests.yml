@@ -18,7 +18,7 @@ on:
         default: false
 
 concurrency:
-  group: reader-assets
+  group: reader-pdf-manifest
   cancel-in-progress: false
   queue: max
 

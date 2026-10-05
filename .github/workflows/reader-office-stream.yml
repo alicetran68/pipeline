@@ -16,7 +16,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-office
   cancel-in-progress: false
   queue: max
 

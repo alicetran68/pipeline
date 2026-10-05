@@ -52,7 +52,7 @@ on:
         type: boolean
 
 concurrency:
-  group: reader-assets
+  group: reader-pdf-gc
   cancel-in-progress: false
   queue: max
 

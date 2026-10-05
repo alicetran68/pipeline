@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: reader-assets
+  group: reader-pdf
   cancel-in-progress: false
   queue: max
 

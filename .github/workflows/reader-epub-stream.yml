@@ -15,7 +15,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-ebooks
   cancel-in-progress: false
   queue: max
 

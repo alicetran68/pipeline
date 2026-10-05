@@ -22,7 +22,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-assets
+  group: reader-gc
   cancel-in-progress: false
   queue: max
 

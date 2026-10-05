@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     concurrency:
-      group: reader-assets
+      group: reader-sidecar
       cancel-in-progress: false
       queue: max
     steps:
