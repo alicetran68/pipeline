@@ -97,6 +97,11 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         ext = str(record.get("Extension") or "").lower().lstrip(".")
         if (repo and source_repo != repo) or (extension and ext != extension):
             continue
+        # PDF page/OCR assets have a separate page-stream publisher. The
+        # generic static migration must never republish a PDF as a dataset
+        # document and call that a bucket migration.
+        if bucket_migrate and ext == "pdf":
+            continue
         path = relative_path(record)
         if ext in {"htm", "html"} and any(
                 part.lower() == ".files" or part.lower().endswith(".files") or part.lower().endswith("_files")

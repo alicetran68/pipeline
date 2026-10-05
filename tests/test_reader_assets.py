@@ -533,6 +533,13 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(queue[0]["output_name"], "document.html")
         self.assertNotIn("page_stream", queue[0])
 
+    def test_bucket_migration_leaves_pdfs_to_the_dedicated_page_pipeline(self):
+        records = [{"Repo": "VoiceOfML/Test", "File": "Book", "Extension": "pdf",
+                    "Folder": [], "Size": 100}]
+        self.assertEqual(scan_reader_assets.build_queue(
+            records, self.revisions, reader_assets.empty_manifest(), bucket_migrate=True,
+        ), [])
+
     def test_bucket_migration_queues_csv_as_native_html(self):
         record = {"Repo": "VoiceOfML/Test", "File": "Data", "Extension": "csv",
                   "Folder": [], "Size": 100}
