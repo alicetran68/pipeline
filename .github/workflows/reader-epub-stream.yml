@@ -1,0 +1,46 @@
+name: Build Reader EPUB Chapter Streams
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum EPUB files; 0 means all
+        required: true
+        default: "0"
+        type: string
+      max_source_bytes:
+        description: Maximum source bytes; 0 means unlimited
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-assets
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  epub-stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch current source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Build and publish EPUB chapter streams
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          [[ "${{ inputs.max_source_bytes || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_epub_chapters.py \
+            --limit "${{ inputs.limit || '0' }}" \
+            --max-source-bytes "${{ inputs.max_source_bytes || '0' }}" \
+            --apply
