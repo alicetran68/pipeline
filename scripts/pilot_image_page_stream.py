@@ -13,7 +13,9 @@ import urllib.request
 from pathlib import Path
 
 from huggingface_hub import HfFileSystem, batch_bucket_files
-from PIL import Image, ImageSequence
+from PIL import Image, ImageFile, ImageSequence
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 try:
     from .reader_assets import decode_search_payload, relative_path, source_url
@@ -24,6 +26,7 @@ except ImportError:
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 IMAGE_ROOT = "pages/image"
 SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "bmp", "tif", "tiff", "webp", "png"}
+MAX_WEBP_EDGE = 16_383
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,7 +94,18 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
             raise ValueError("image has invalid dimensions")
         for number, frame in enumerate(ImageSequence.Iterator(image), start=1):
             output = pages / f"page-{number:06d}.webp"
-            frame.convert("RGB").save(output, "WEBP", quality=85, method=6)
+            converted = frame.convert("RGB")
+            if max(converted.size) > MAX_WEBP_EDGE:
+                scale = MAX_WEBP_EDGE / max(converted.size)
+                resized = converted.resize(
+                    (max(1, round(converted.width * scale)),
+                     max(1, round(converted.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+                converted.close()
+                converted = resized
+            converted.save(output, "WEBP", quality=85, method=6)
+            converted.close()
             page_bytes = output.read_bytes()
             page_digest = hashlib.sha256(page_bytes).hexdigest()
             relative = f"pages/page-{number:06d}.webp"
@@ -164,10 +178,16 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="reader-image-pilot-") as directory:
         work_root = Path(directory)
         for index, item in enumerate(selected):
-            result, files = build_one(item, work_root / str(index), token, args.bucket)
+            try:
+                result, files = build_one(item, work_root / str(index), token, args.bucket)
+            except Exception as error:
+                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
+                continue
             entries.append(result)
-            for remote, value in files.items():
-                uploads[remote] = value
+            uploads.update(files)
+        if not entries:
+            print("no image source converted successfully")
+            return 1
         previous_files = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
         previous_files.update({entry["key"]: entry for entry in entries})
         index_payload = {"version": 1, "kind": "image-page-stream-index", "files": [

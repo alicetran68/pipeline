@@ -136,7 +136,7 @@ def plan(client, bucket: str, grace_days: int, limit: int) -> tuple[dict, list[s
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bucket", default=os.environ.get("HF_S3_BUCKET", DEFAULT_BUCKET))
-    parser.add_argument("--grace-days", type=int, default=14)
+    parser.add_argument("--grace-days", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--show-paths", action="store_true")
