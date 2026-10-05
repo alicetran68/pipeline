@@ -1,4 +1,4 @@
-name: Build Reader EPUB Chapter Streams
+name: Build Reader Ebook Chapter Streams
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: "0"
         type: string
       max_source_bytes:
-        description: Maximum source bytes; 0 means unlimited
+        description: Maximum source bytes per source; 0 means unlimited
         required: true
         default: "0"
         type: string
@@ -27,6 +27,7 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
+        extension: [epub, mobi, azw3, fb2]
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
@@ -39,13 +40,14 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
-      - name: Build and publish EPUB chapter streams
+      - name: Build and publish ebook chapter streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           [[ "${{ inputs.max_source_bytes || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           python scripts/pilot_epub_chapters.py \
+            --extension "${{ matrix.extension }}" \
             --limit "${{ inputs.limit || '0' }}" \
             --max-source-bytes "${{ inputs.max_source_bytes || '0' }}" \
             --shard-count 8 \
