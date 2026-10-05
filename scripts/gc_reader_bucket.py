@@ -345,6 +345,11 @@ def expand_reference_closure(store: S3BucketStore, files: set[str], references: 
                     )
                 elif path.endswith("/chapter-manifest.json"):
                     root = posixpath.dirname(path)
+                    # Chapter manifests describe XHTML and search-index paths,
+                    # but not images/fonts referenced from the XHTML. Keep the
+                    # complete immutable bundle while its manifest is live.
+                    references.update(item for item in files
+                                     if item.startswith(root + "/"))
                     chapters = payload.get("chapters")
                     if not isinstance(chapters, list):
                         raise IndexUnavailable(f"invalid ebook chapter manifest: {path}")

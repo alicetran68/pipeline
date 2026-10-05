@@ -191,6 +191,34 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     return toc
 
 
+def link_inline_toc(clean: str, record: dict, chapter_paths: dict[str, str],
+                    records: list[dict], toc_entries: list[dict]) -> str:
+    """Link plain paragraph TOCs found in EPUBs that omitted hrefs entirely."""
+    targets = {
+        re.sub(r"\s+", " ", str(item.get("title") or "")).strip(): chapter_paths[item["source_path"]]
+        for item in records
+        if item.get("source_path") in chapter_paths and item.get("title")
+    }
+    targets.update({
+        re.sub(r"\s+", " ", str(item.get("title") or "")).strip(): chapter_paths[item["source_path"]]
+        for item in toc_entries
+        if item.get("source_path") in chapter_paths and item.get("title")
+    })
+    if (len(targets) < 2 or re.search(r"<a\b", clean, re.I)
+            or not ("目录" in record.get("title", "")
+                    or sum(clean.count(html.escape(title)) for title in targets) >= 2)):
+        return clean
+    paragraph = re.compile(r"(<(?:html:)?p\b[^>]*>)(\s*)([^<]+?)(\s*)(</(?:html:)?p>)", re.I)
+    def replace(match):
+        title = re.sub(r"\s+", " ", match.group(3)).strip()
+        target = targets.get(title)
+        if not target:
+            return match.group(0)
+        return (f'{match.group(1)}{match.group(2)}<a href="{html.escape(target, quote=True)}">'
+                f'{match.group(3)}</a>{match.group(4)}{match.group(5)}')
+    return paragraph.sub(replace, clean)
+
+
 def _can_share_resource(path: str) -> bool:
     return Path(path).suffix.lower() in {
         ".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp",
@@ -356,6 +384,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
                 return f'{match.group(1)}="{html.escape(target, quote=True)}"'
             clean = re.sub(r'(?<![\w:-])(href)\s*=\s*["\']([^"\']*)["\']',
                            rewrite_chapter_link, clean, flags=re.I)
+            clean = link_inline_toc(clean, record, chapter_paths, chapter_records, toc_entries)
             resources = record["resources"]
             if include_resources:
                 resource_bytes = sum(archive.getinfo(resource).file_size for resource in resources)

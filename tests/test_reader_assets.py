@@ -112,11 +112,13 @@ class ReaderAssetContractTests(unittest.TestCase):
             manifest,
             "ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml",
             "ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz",
+            "ebook-chapters/objects/ab/book/epub-chapters/resources/chapter-0001/cover.jpg",
         }
         references = {manifest}
         gc_reader_bucket.expand_reference_closure(store, files, references)
         self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml", references)
         self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz", references)
+        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/resources/chapter-0001/cover.jpg", references)
 
     def test_bucket_gc_jxl_only_filters_candidates_without_touching_other_assets(self):
         store = Mock()
@@ -3349,6 +3351,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.bucket_migrate || 'true'", workflow)
         for field in ("repo:", "extension:", "limit:", "checkpoint_batches:", "retry_failed:", "force:", "dry_run:"):
             self.assertIn(field, workflow)
+        self.assertIn("clean_rebuild:", workflow)
+        self.assertIn("--clean-rebuild --force --bucket-migrate", workflow)
         self.assertNotIn("pdg", workflow.lower())
         self.assertIn("publish_search_reader_index.py", workflow)
         self.assertIn("fonts-noto-cjk", workflow)
