@@ -126,7 +126,9 @@ ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
 def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES) -> tuple[str, int]:
-    for attempt in range(3):
+    # HF resolve URLs can briefly return 404 while a dataset revision is
+    # propagating. Do not resume a stale partial file after that response.
+    for attempt in range(5):
         offset = target.stat().st_size if target.exists() else 0
         headers = {"User-Agent": "VoiceOfML-Reader-Assets/1.0"}
         if offset:
@@ -163,12 +165,14 @@ def download_source(url: str, target: Path, *, max_bytes: int = MAX_SOURCE_BYTES
                         output.write(chunk)
             return digest.hexdigest(), size
         except urllib.error.HTTPError as exc:
-            if exc.code not in {408, 429} and exc.code < 500:
+            if exc.code == 404:
+                target.unlink(missing_ok=True)
+            elif exc.code not in {408, 429} and exc.code < 500:
                 raise
             error = exc
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
             error = exc
-        if attempt == 2:
+        if attempt == 4:
             raise error
         time.sleep(attempt + 1)
     raise RuntimeError("source download retry limit reached")

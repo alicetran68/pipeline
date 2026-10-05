@@ -929,6 +929,33 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(digest, hashlib.sha256(b"hello world").hexdigest())
             self.assertEqual(open_url.call_args.args[0].headers["Range"], "bytes=6-")
 
+    def test_download_source_retries_transient_not_found_without_partial_file(self):
+        class Response:
+            status = 200
+            headers = {}
+            done = False
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, _size):
+                if self.done:
+                    return b""
+                self.done = True
+                return b"hello"
+
+        request = urllib.request.Request("https://example.test/source")
+        not_found = urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "source.bin"
+            target.write_bytes(b"stale partial")
+            with patch.object(urllib.request, "urlopen", side_effect=[not_found, Response()]) as open_url, \
+                    patch.object(convert_reader_assets.time, "sleep") as sleep:
+                digest, size = convert_reader_assets.download_source("https://example.test/source", target)
+            self.assertEqual(target.read_bytes(), b"hello")
+            self.assertEqual(size, 5)
+            self.assertEqual(digest, hashlib.sha256(b"hello").hexdigest())
+            self.assertEqual(sleep.call_count, 1)
+            self.assertNotIn("Range", open_url.call_args_list[1].args[0].headers)
+
     def test_download_source_rejects_invalid_content_range(self):
         class Response:
             status = 206

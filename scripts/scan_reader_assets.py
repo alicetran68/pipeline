@@ -182,7 +182,7 @@ def build_queue(records, revisions, manifest, *, repo="", extension="", exact_pa
         selected.append(item)
     priority = {"pdf": 9, "tif": 0, "tiff": 0, "epub": 1, "mobi": 1, "azw3": 1, "fb2": 1, "odt": 1, "rtf": 1, "chm": 1, "djvu": 2,
                   "doc": 3, "docx": 3, "htm": 3, "html": 3, "txt": 3, "md": 3, "markdown": 3,
-                   "jpg": 3, "jpeg": 3, "png": 3, "gif": 3, "bmp": 3, "webp": 3, "psd": 3,
+                   "jpg": 3, "jpeg": 3, "png": 3, "bmp": 3, "webp": 3,
                    "vcf": 3, "ini": 3, "caj": 3, "kdh": 3,
                  "ppt": 3, "pptx": 3, "pps": 3, "odp": 3, "xls": 3, "xlsx": 3, "csv": 3, "ods": 3, "wps": 3,
                  "mht": 3, "mhtml": 3, "ps": 3,
@@ -248,6 +248,8 @@ def parse_args():
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--bucket-migrate", action="store_true")
+    parser.add_argument("--clean-rebuild", action="store_true",
+                        help="rebuild the complete non-PDF snapshot and publish it authoritatively")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--manifest", type=Path)
@@ -259,6 +261,8 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0:
         raise ValueError("limit must be non-negative")
+    if args.clean_rebuild and (args.repo or args.extension or args.path):
+        raise ValueError("clean rebuild cannot be combined with a scoped filter")
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise ValueError("invalid reader asset shard")
     records = decode_search_payload(load_json(args.search_data))
@@ -281,8 +285,9 @@ def main() -> int:
             if not required.issubset(present_dependencies):
                 bucket_objects.discard(manifest_path)
     queue = build_queue(records, revisions, manifest, repo=args.repo, extension=args.extension, exact_path=args.path,
-                        limit=args.limit, retry_failed=args.retry_failed, force=args.force,
-                         bucket_migrate=args.bucket_migrate,
+                        limit=args.limit, retry_failed=args.retry_failed,
+                        force=args.force or args.clean_rebuild,
+                        bucket_migrate=args.bucket_migrate,
                          bucket_objects=bucket_objects,
                          shard_count=args.shard_count, shard_index=args.shard_index)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -293,8 +298,8 @@ def main() -> int:
         "active_keys": current_keys,
         "stale_keys": sorted(set(manifest.get("files", {})) - set(current_keys)),
         "objects": reusable_objects(manifest),
-        "force_rebuild": bool(args.force),
-        "authoritative_snapshot": not bool(args.repo or args.extension or args.path or args.bucket_migrate),
+        "force_rebuild": bool(args.force or args.clean_rebuild),
+        "authoritative_snapshot": bool(args.clean_rebuild) or not bool(args.repo or args.extension or args.path or args.bucket_migrate),
         "bucket_migration": bool(args.bucket_migrate),
     }, pretty=True))
     print(f"queued {len(queue)} reader asset conversion(s)")

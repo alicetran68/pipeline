@@ -39,10 +39,8 @@ BUCKET_NATIVE_EXTENSIONS = {
     "jpg": ("native-image-webp-v1", "image", "document.webp"),
     "jpeg": ("native-image-webp-v1", "image", "document.webp"),
     "png": ("native-image-webp-v1", "image", "document.webp"),
-    "gif": ("native-image-webp-v1", "image", "document.webp"),
     "bmp": ("native-image-webp-v1", "image", "document.webp"),
     "webp": ("native-image-webp-v1", "image", "document.webp"),
-    "psd": ("native-image-webp-v1", "image", "document.webp"),
     "vcf": ("native-text-v1", "text", "document.txt"),
     "ini": ("native-text-v1", "text", "document.txt"),
 }

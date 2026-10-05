@@ -11,7 +11,7 @@ on:
         default: ""
         type: string
       extension:
-        description: txt, md, markdown, jpg, jpeg, png, gif, bmp, webp, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, mp3, wav, m4a, flac, mpga, mp4, mov, asx, swf, or blank
+        description: txt, md, markdown, jpg, jpeg, png, gif, bmp, webp, doc, docx, epub, htm, html, mobi, azw3, fb2, odt, rtf, chm, tif, tiff, djvu, ppt, pptx, pps, odp, xls, xlsx, csv, ods, wps, mht, mhtml, ps, caj, kdh, mp3, wav, m4a, flac, mpga, mp4, mov, asx, swf, flv, f4v, rm, rmvb, mkv, avi, mpg, mpeg, mts, ts, wmv, or blank
         required: false
         default: ""
         type: string
@@ -37,6 +37,11 @@ on:
         type: boolean
       force:
         description: Rebuild even when the current asset is ready
+        required: false
+        default: false
+        type: boolean
+      clean_rebuild:
+        description: Rebuild every non-PDF Reader asset and replace the complete current mapping snapshot
         required: false
         default: false
         type: boolean
@@ -128,6 +133,7 @@ jobs:
           )
           if [[ "${{ inputs.retry_failed || github.event_name == 'schedule' }}" == "true" ]]; then args+=(--retry-failed); fi
           if [[ "${{ inputs.force }}" == "true" ]]; then args+=(--force); fi
+          if [[ "${{ inputs.clean_rebuild }}" == "true" ]]; then args+=(--clean-rebuild --force --bucket-migrate); fi
           if [[ "${{ inputs.bucket_migrate || 'true' }}" == "true" ]]; then args+=(--bucket-migrate); fi
           retry_reader_command python scripts/scan_reader_assets.py "${args[@]}"
           python scripts/prepare_reader_assets_plan.py

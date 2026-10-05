@@ -1,0 +1,80 @@
+name: Build Reader Image Streams
+
+on:
+  schedule:
+    - cron: "17 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Image extension to process, or all retained image formats
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - jpg
+          - jpeg
+          - png
+          - bmp
+          - tif
+          - tiff
+          - webp
+      limit:
+        description: Maximum source images per extension; 0 means all
+        required: true
+        default: "0"
+        type: string
+      max_source_bytes:
+        description: Maximum source bytes per image; 0 means unlimited
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-assets
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  image-stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        extension: [jpg, jpeg, png, bmp, tif, tiff, webp]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+      - name: Fetch current source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Select requested extension
+        id: select
+        env:
+          REQUESTED_EXTENSION: ${{ inputs.extension || 'all' }}
+          MATRIX_EXTENSION: ${{ matrix.extension }}
+        run: |
+          if [[ "${REQUESTED_EXTENSION}" == "all" || "${REQUESTED_EXTENSION}" == "${MATRIX_EXTENSION}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish image streams
+        if: steps.select.outputs.enabled == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          [[ "${{ inputs.max_source_bytes || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_image_page_stream.py \
+            --extension "${{ matrix.extension }}" \
+            --max-source-bytes "${{ inputs.max_source_bytes || '0' }}" \
+            --limit "${{ inputs.limit || '0' }}" \
+            --apply
