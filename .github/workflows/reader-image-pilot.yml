@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         extension: [jpg, jpeg, png, bmp, tif, tiff, webp]
     steps:
