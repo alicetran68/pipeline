@@ -1,0 +1,60 @@
+name: Build Reader Spreadsheet Streams
+
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Spreadsheet format to process, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, xls, xlsx, csv, ods]
+      limit:
+        description: Maximum files; 0 means all
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-assets
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  spreadsheet-stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        extension: [xls, xlsx, csv, ods]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install spreadsheet tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-calc python3-uno fontconfig fonts-noto-cjk fonts-wqy-microhei
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch current source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Select requested extension
+        id: select
+        env:
+          REQUESTED_EXTENSION: ${{ inputs.extension || 'all' }}
+          MATRIX_EXTENSION: ${{ matrix.extension }}
+        run: |
+          if [[ "${REQUESTED_EXTENSION}" == "all" || "${REQUESTED_EXTENSION}" == "${MATRIX_EXTENSION}" ]]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else echo "enabled=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Build and publish spreadsheet streams
+        if: steps.select.outputs.enabled == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_spreadsheet_stream.py --extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply
