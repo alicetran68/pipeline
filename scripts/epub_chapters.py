@@ -57,6 +57,30 @@ def _local_name(node) -> str:
     return node.tag.rsplit("}", 1)[-1].lower() if isinstance(node.tag, str) else ""
 
 
+def _parse_package_xml(raw: bytes):
+    """Parse package XML and repair undeclared prefixes used by old EPUBs."""
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError as error:
+        if "unbound prefix" not in str(error):
+            raise
+        text = raw.decode("utf-8", "replace")
+        match = re.search(r"<([A-Za-z_][\w.-]*)(?:\s[^>]*)?>", text, re.S)
+        if not match:
+            raise
+        root_tag = match.group(1)
+        declared = set(re.findall(r"xmlns:([A-Za-z_][\w.-]*)\s*=", match.group(0)))
+        used = set(re.findall(r"(?<!xmlns:)([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*", text))
+        missing = sorted(prefix for prefix in used if prefix not in declared and prefix != root_tag)
+        if not missing:
+            raise
+        replacement = match.group(0)[:-1] + "".join(
+            f' xmlns:{prefix}="urn:reader-repair:{prefix}"' for prefix in missing
+        ) + ">"
+        repaired = text[:match.start()] + replacement + text[match.end():]
+        return ET.fromstring(repaired.encode("utf-8"))
+
+
 def _node_text(node) -> str:
     return re.sub(r"\s+", " ", " ".join(node.itertext())).strip()
 
@@ -292,7 +316,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
         if rootfile is None:
             raise ValueError("EPUB package is missing")
         opf_path = rootfile.attrib.get("full-path", "")
-        opf = ET.fromstring(archive.read(opf_path))
+        opf = _parse_package_xml(archive.read(opf_path))
         base = posixpath.dirname(opf_path)
         manifest = {}
         for node in opf.iter():

@@ -133,20 +133,37 @@ def main() -> int:
     if not selected:
         print("no pending EPUB sources")
         return 0
-    uploads, entries = {}, []
+    uploads, entries, failures = {}, [], []
     with tempfile.TemporaryDirectory(prefix="reader-epub-") as directory:
         root = Path(directory)
         for index, item in enumerate(selected):
             item["extension"] = extension
-            entry, files = build_one(item, root / str(index), token, args.bucket)
+            try:
+                entry, files = build_one(item, root / str(index), token, args.bucket)
+            except Exception as error:
+                failures.append({
+                    "key": f"{item['repo']}\0{item['path']}",
+                    "repo": item["repo"], "path": item["path"],
+                    "source_revision": item["revision"],
+                    "error": f"{type(error).__name__}: {error}",
+                })
+                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
+                continue
             entries.append(entry)
             uploads.update(files)
+        if not entries and failures:
+            print(f"no EPUB source converted; failures={len(failures)}")
+            return 0
         merged = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
         merged.update({entry["key"]: entry for entry in entries})
         index_file = root / "index.json"
-        index_file.write_text(json.dumps({"version": 1, "kind": "ebook-chapter-stream-index", "files": [merged[key] for key in sorted(merged)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        index_file.write_text(json.dumps({
+            "version": 1, "kind": "ebook-chapter-stream-index",
+            "files": [merged[key] for key in sorted(merged)],
+            "failures": failures,
+        }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         uploads[f"{root_prefix}/{index_name}"] = str(index_file)
-        print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s)")
+        print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s), failures={len(failures)}")
         if args.apply:
             batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
             print(f"published {len(uploads)} object(s) to {args.bucket}")
