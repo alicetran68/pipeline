@@ -3,6 +3,8 @@
 
 import hashlib
 import os
+import random
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -60,6 +62,34 @@ def is_retryable_hf_status(status: int | None, extra: frozenset = frozenset({409
 def hf_retry_delay(attempt: int, cap: int = 60, max_shift: int = 5) -> int:
     """Bounded exponential backoff shared by HF publication retries."""
     return min(cap, 2 ** min(attempt, max_shift))
+
+
+def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]], token: str | None,
+                                  *, max_attempts: int = 8) -> None:
+    """Upload a bucket batch with bounded retry for HF/Xet throttling."""
+    from huggingface_hub import batch_bucket_files
+
+    for attempt in range(max_attempts):
+        try:
+            batch_bucket_files(bucket, add=additions, token=token)
+            return
+        except Exception as error:
+            response = getattr(error, "response", None)
+            status = getattr(response, "status_code", None)
+            text = str(error).lower()
+            retryable = (
+                status in {408, 425, 429, 500, 502, 503, 504}
+                or "too many requests" in text
+                or "xet-write-token" in text
+                or "timeout" in text
+                or isinstance(error, (ConnectionError, TimeoutError))
+            )
+            if not retryable or attempt + 1 == max_attempts:
+                raise
+            delay = min(300, hf_retry_delay(attempt, cap=120) + random.uniform(0, 3))
+            print(f"transient HF bucket upload error ({status or type(error).__name__}); "
+                  f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})", flush=True)
+            time.sleep(delay)
 
 
 def pdf_pages_sidecar_entry(path: str) -> dict:

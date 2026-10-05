@@ -12,15 +12,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from huggingface_hub import HfFileSystem, batch_bucket_files
+from huggingface_hub import HfFileSystem
 from PIL import Image, ImageFile, ImageSequence
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 try:
     from .reader_assets import decode_search_payload, relative_path, source_url
+    from .shared import batch_bucket_files_with_retry
 except ImportError:
     from reader_assets import decode_search_payload, relative_path, source_url
+    from shared import batch_bucket_files_with_retry
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
@@ -207,7 +209,7 @@ def main() -> int:
         uploads[f"{IMAGE_ROOT}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} image stream(s), {len(uploads)} object(s)")
         if args.apply:
-            batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
+            batch_bucket_files_with_retry(args.bucket, [(local, remote) for remote, local in sorted(uploads.items())], token)
             print(f"published {len(uploads)} object(s) to {args.bucket}")
         else:
             print("report-only; pass --apply to publish")
