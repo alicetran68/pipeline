@@ -242,6 +242,10 @@ class ReaderAssetContractTests(unittest.TestCase):
             reader_assets.bucket_conversion_contract("repo", "table.xlsx", "xlsx"),
             (reader_assets.SPREADSHEET_HTML_PROFILE, "html", "document.html"),
         )
+        self.assertEqual(
+            reader_assets.bucket_conversion_contract("repo", "animation.swf", "swf"),
+            ("native-swf-ruffle-v1", "swf", "document.swf"),
+        )
         for extension, mode, output in (
             ("mp3", "audio", "audio.mp3"), ("wav", "audio", "audio.wav"),
             ("m4a", "audio", "audio.m4a"), ("flac", "audio", "audio.flac"),

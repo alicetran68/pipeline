@@ -35,6 +35,11 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r scripts/requirements.txt
+      - name: Install Calibre for converted ebook formats
+        if: matrix.extension != 'epub'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends calibre
       - name: Fetch current source metadata
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
