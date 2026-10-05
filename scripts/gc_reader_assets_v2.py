@@ -16,7 +16,7 @@ DEFAULT_BUCKET = "vomebook/reader-assets-v2"
 LIFECYCLE_PATH = "reader-index/reader_lifecycle.json"
 INDEX_PREFIXES = (
     "pages/image/", "pages/pdf/", "pages/document/",
-    "documents/text/", "documents/web/", "documents/spreadsheet/",
+    "documents/text/", "documents/web/", "documents/spreadsheet/", "documents/office/",
     "chapters/ebook/epub/", "chapters/ebook/chm/", "chapters/", "native/",
 )
 
