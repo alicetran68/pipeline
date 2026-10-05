@@ -1,0 +1,65 @@
+name: Build Reader Media Streams
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Media kind to process, or all
+        required: true
+        default: all
+        type: choice
+        options: [all, audio, video, swf]
+      limit:
+        description: Maximum files per shard; 0 means all
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-media
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  media:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        kind: [audio, video, swf]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Fetch current source metadata
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Select requested media kind
+        id: select
+        env:
+          REQUESTED_KIND: ${{ inputs.kind || 'all' }}
+          MATRIX_KIND: ${{ matrix.kind }}
+        run: |
+          if [[ "${REQUESTED_KIND}" == "all" || "${REQUESTED_KIND}" == "${MATRIX_KIND}" ]]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else echo "enabled=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Build and publish media streams
+        if: steps.select.outputs.enabled == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          python scripts/pilot_media_stream.py \
+            --kind "${{ matrix.kind }}" \
+            --limit "${{ inputs.limit || '0' }}" \
+            --shard-count 8 \
+            --shard-index "${{ matrix.shard }}" \
+            --apply

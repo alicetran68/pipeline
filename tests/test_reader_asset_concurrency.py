@@ -6,14 +6,15 @@ ROOT = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 
 
 class ReaderAssetConcurrencyTests(unittest.TestCase):
-    def test_all_reader_asset_publishers_share_one_queue(self):
-        for filename in (
-            "reader-assets.yml", "pdf-assets-worker.yml",
-            "migrate-pdf-page-manifests.yml",
-        ):
+    def test_reader_publishers_use_partitioned_queues(self):
+        expected = {
+            "reader-assets.yml": "group: reader-general",
+            "pdf-assets-worker.yml": "group: reader-pdf",
+            "migrate-pdf-page-manifests.yml": "group: reader-pdf-manifest",
+        }
+        for filename, group in expected.items():
             workflow = (ROOT / filename).read_text(encoding="utf-8")
-            self.assertIn("group: reader-assets", workflow, filename)
-            self.assertNotIn("group: reader-assets-pdf", workflow, filename)
+            self.assertIn(group, workflow, filename)
             self.assertIn("cancel-in-progress: false", workflow, filename)
             self.assertIn("queue: max", workflow, filename)
 

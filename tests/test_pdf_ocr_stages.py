@@ -517,7 +517,7 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertIn("plan-render --partition large --native-text-stream", large)
         self.assertIn("plan-render --partition small --native-text-stream", small)
         self.assertIn("group: pdf-render-small-inputs", small)
-        self.assertIn("group: reader-assets", small)
+        self.assertIn("group: reader-sidecar", small)
 
     def test_native_text_stream_plan_marks_pages_for_images_without_ocr(self):
         item = {**self.item(), "source_bytes": 1024}
