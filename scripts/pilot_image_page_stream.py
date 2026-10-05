@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="all")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     return parser.parse_args()
 
 
@@ -138,8 +140,8 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     }, uploads
 
 
-def existing_index(bucket: str, token: str | None) -> dict:
-    path = f"hf://buckets/{bucket}/{IMAGE_ROOT}/index.json"
+def existing_index(bucket: str, token: str | None, name: str = "index.json") -> dict:
+    path = f"hf://buckets/{bucket}/{IMAGE_ROOT}/{name}"
     try:
         fs = HfFileSystem(token=token)
         with fs.open(path, "rb") as stream:
@@ -155,18 +157,24 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0 or args.max_source_bytes < 0:
         raise ValueError("limit and max-source-bytes must be non-negative")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        raise ValueError("invalid shard")
     token = os.environ.get("HF_TOKEN")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     extension = args.extension.lower().lstrip(".")
     if extension != "all" and extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"unsupported image extension: {extension}")
     selected = source_records(args.search_data, revisions, args.max_source_bytes, extension)
-    previous = existing_index(args.bucket, token)
+    index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
+    previous = existing_index(args.bucket, token, index_name)
+    canonical = existing_index(args.bucket, token)
     completed = {
         entry.get("key"): entry.get("source_revision")
         for entry in previous.get("files", []) if isinstance(entry, dict)
     }
     selected = [item for item in selected
+                if int.from_bytes(hashlib.sha256(
+                    f"{item['repo']}\0{item['path']}".encode()).digest()[:8], "big") % args.shard_count == args.shard_index
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     if args.limit:
         selected = selected[:args.limit]
@@ -189,13 +197,14 @@ def main() -> int:
             print("no image source converted successfully")
             return 1
         previous_files = {entry.get("key"): entry for entry in previous.get("files", []) if isinstance(entry, dict)}
+        previous_files.update({entry.get("key"): entry for entry in canonical.get("files", []) if isinstance(entry, dict)})
         previous_files.update({entry["key"]: entry for entry in entries})
         index_payload = {"version": 1, "kind": "image-page-stream-index", "files": [
             previous_files[key] for key in sorted(previous_files)
         ]}
         index_file = work_root / "index.json"
         index_file.write_text(json.dumps(index_payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        uploads[f"{IMAGE_ROOT}/index.json"] = str(index_file)
+        uploads[f"{IMAGE_ROOT}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} image stream(s), {len(uploads)} object(s)")
         if args.apply:
             batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
