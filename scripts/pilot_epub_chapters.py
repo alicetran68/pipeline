@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import urllib.request
@@ -15,18 +16,20 @@ from pathlib import Path
 from huggingface_hub import HfFileSystem
 
 try:
+    from .convert_reader_assets import convert_item
     from .epub_chapters import build_bundle, bundle_version
-    from .reader_assets import decode_search_payload, relative_path, source_url
+    from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from .shared import batch_bucket_files_with_retry
 except ImportError:
+    from convert_reader_assets import convert_item
     from epub_chapters import build_bundle, bundle_version
-    from reader_assets import decode_search_payload, relative_path, source_url
+    from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from shared import batch_bucket_files_with_retry
 
 
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 ROOT = "chapters/ebook/epub"
-SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2"}
+SUPPORTED_EXTENSIONS = {"epub", "mobi", "azw3", "fb2", "chm"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,18 +93,46 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_bytes = source.read_bytes()
     source_digest = hashlib.sha256(source_bytes).hexdigest()
-    chapter_source = source
-    if extension != "epub":
-        chapter_source = work / "chapter-source.epub"
-        subprocess.run(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
-                       check=True, timeout=600)
-    bundle = work / "bundle"
-    manifest = build_bundle(chapter_source, bundle)
-    version = bundle_version(bundle)
-    root = f"chapters/ebook/{extension}/{source_digest}/{version}"
+    native_fallback = None
+    if extension == "chm":
+        contract = bucket_conversion_contract(item["repo"], item["path"], extension, item["source_bytes"])
+        if contract is None:
+            raise ValueError("no CHM conversion contract")
+        profile, mode, output_name = contract
+        converted = convert_item({
+            "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
+            "extension": extension, "source_revision": item["revision"], "source_url": source_url(
+                item["repo"], item["revision"], item["path"]), "source_bytes": item["source_bytes"],
+            "profile": profile, "reader_mode": mode, "output_name": output_name,
+        }, work / "converted")
+        if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
+            raise RuntimeError(converted.get("chapter_bundle_error") or "CHM chapter stream was not produced")
+        converted_root = work / "converted"
+        source_chapter_dir = converted_root / Path(converted["chapter_manifest"]).parent
+        bundle = work / "bundle"
+        shutil.copytree(source_chapter_dir, bundle)
+        manifest = json.loads((bundle / "chapter-manifest.json").read_text(encoding="utf-8"))
+        native_source = converted_root / converted["path"]
+        native_fallback = f"native/ebook/chm/{source_digest}/document.epub"
+    else:
+        chapter_source = source
+        if extension != "epub":
+            chapter_source = work / "chapter-source.epub"
+            subprocess.run(["ebook-convert", str(source), str(chapter_source), "--flow-size", "0"],
+                           check=True, timeout=600)
+        bundle = work / "bundle"
+        manifest = build_bundle(chapter_source, bundle)
+    if extension == "chm":
+        version = bundle_version(bundle)
+        root = f"chapters/ebook/{extension}/{source_digest}/{version}"
+    else:
+        version = bundle_version(bundle)
+        root = f"chapters/ebook/{extension}/{source_digest}/{version}"
     uploads = {}
     for path in sorted(item for item in bundle.rglob("*") if item.is_file()):
         uploads[f"{root}/{path.relative_to(bundle).as_posix()}"] = str(path)
+    if native_fallback:
+        uploads[native_fallback] = str(native_source)
     return {
         "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
         "source_extension": extension, "source_revision": item["revision"], "source_sha256": source_digest,
@@ -109,6 +140,7 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         "root": root, "manifest": f"{root}/chapter-manifest.json",
         "chapter_count": len(manifest["chapters"]),
         "search_index": f"{root}/epub-search-index.json.gz",
+        **({"fallback": native_fallback, "object": native_fallback} if native_fallback else {}),
     }, uploads
 
 

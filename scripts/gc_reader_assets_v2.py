@@ -91,7 +91,7 @@ def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
             for entry in entries:
                 if not isinstance(entry, dict):
                     raise IndexUnavailable(f"invalid entry: {index_path}")
-                for field in ("object", "manifest", "path", "root"):
+                for field in ("object", "fallback", "manifest", "path", "root"):
                     value = entry.get(field)
                     if isinstance(value, str):
                         root = value if field == "root" else value.rsplit("/", 1)[0]

@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        extension: [epub, mobi, azw3, fb2]
+        extension: [epub, mobi, azw3, fb2, chm]
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
@@ -40,6 +40,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends calibre
+      - name: Install CHM extraction tools
+        if: matrix.extension == 'chm'
+        run: sudo apt-get install -y --no-install-recommends p7zip-full
       - name: Fetch current source metadata
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
