@@ -23,6 +23,11 @@ jobs:
   epub-stream:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -43,4 +48,6 @@ jobs:
           python scripts/pilot_epub_chapters.py \
             --limit "${{ inputs.limit || '0' }}" \
             --max-source-bytes "${{ inputs.max_source_bytes || '0' }}" \
+            --shard-count 8 \
+            --shard-index "${{ matrix.shard }}" \
             --apply

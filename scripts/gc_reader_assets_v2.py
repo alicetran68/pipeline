@@ -78,25 +78,23 @@ def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
     references = {path for path in files if path.endswith("/index.json")}
     found_index = False
     for prefix in INDEX_PREFIXES:
-        index_path = f"{prefix}index.json"
-        if index_path not in files:
-            continue
-        found_index = True
-        payload = read_json(client, bucket, index_path)
-        entries = payload.get("files")
-        if not isinstance(entries, list):
-            raise IndexUnavailable(f"invalid file list: {index_path}")
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise IndexUnavailable(f"invalid entry: {index_path}")
-            for field in ("object", "manifest", "path"):
-                value = entry.get(field)
-                if isinstance(value, str) and value in files:
-                    references.add(value)
-                    # An active object is an immutable tree. Protect all of its
-                    # children, including resources not repeated in the index.
-                    root = value.rsplit("/", 1)[0]
-                    references.update(path for path in files if path.startswith(root + "/"))
+        index_paths = [path for path in files
+                       if path.startswith(prefix + "index") and path.endswith(".json")]
+        for index_path in index_paths:
+            found_index = True
+            references.add(index_path)
+            payload = read_json(client, bucket, index_path)
+            entries = payload.get("files")
+            if not isinstance(entries, list):
+                raise IndexUnavailable(f"invalid file list: {index_path}")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise IndexUnavailable(f"invalid entry: {index_path}")
+                for field in ("object", "manifest", "path", "root"):
+                    value = entry.get(field)
+                    if isinstance(value, str):
+                        root = value if field == "root" else value.rsplit("/", 1)[0]
+                        references.update(path for path in files if path == value or path.startswith(root + "/"))
     if not found_index:
         raise IndexUnavailable("no v2 category index is published")
     return references

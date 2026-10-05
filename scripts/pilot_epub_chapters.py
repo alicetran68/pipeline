@@ -36,6 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extension", default="epub")
     parser.add_argument("--bucket", default=TARGET_BUCKET)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     return parser.parse_args()
 
 
@@ -47,16 +49,20 @@ def download(url: str, target: Path, token: str | None) -> None:
         target.write_bytes(response.read())
 
 
-def existing_index(bucket: str, token: str | None, root: str) -> dict:
+def existing_index(bucket: str, token: str | None, root: str, name: str = "index.json") -> dict:
     try:
         fs = HfFileSystem(token=token)
-        with fs.open(f"hf://buckets/{bucket}/{root}/index.json", "rb") as stream:
+        with fs.open(f"hf://buckets/{bucket}/{root}/{name}", "rb") as stream:
             payload = json.loads(stream.read().decode("utf-8"))
         if isinstance(payload, dict) and isinstance(payload.get("files"), list):
             return payload
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
         pass
     return {"version": 1, "kind": "ebook-chapter-stream-index", "files": []}
+
+
+def shard_for(key: str, count: int) -> int:
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big") % count
 
 
 def select_records(path: Path, revisions: dict, max_bytes: int, extension_filter: str) -> list[dict]:
@@ -108,15 +114,19 @@ def main() -> int:
     args = parse_args()
     if args.limit < 0 or args.max_source_bytes < 0:
         raise ValueError("limit and max-source-bytes must be non-negative")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        raise ValueError("invalid shard")
     token = os.environ.get("HF_TOKEN")
     extension = args.extension.lower().lstrip(".")
     if extension not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"unsupported ebook extension: {extension}")
     revisions = json.loads(args.revisions.read_text(encoding="utf-8"))
     root_prefix = f"chapters/ebook/{extension}"
-    previous = existing_index(args.bucket, token, root_prefix)
+    index_name = "index.json" if args.shard_count == 1 else f"index-{args.shard_index:02d}.json"
+    previous = existing_index(args.bucket, token, root_prefix, index_name)
     completed = {entry.get("key"): entry.get("source_revision") for entry in previous.get("files", []) if isinstance(entry, dict)}
     selected = [item for item in select_records(args.search_data, revisions, args.max_source_bytes, extension)
+                if shard_for(f"{item['repo']}\0{item['path']}", args.shard_count) == args.shard_index
                 if completed.get(f"{item['repo']}\0{item['path']}") != item["revision"]]
     if args.limit:
         selected = selected[:args.limit]
@@ -135,7 +145,7 @@ def main() -> int:
         merged.update({entry["key"]: entry for entry in entries})
         index_file = root / "index.json"
         index_file.write_text(json.dumps({"version": 1, "kind": "ebook-chapter-stream-index", "files": [merged[key] for key in sorted(merged)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        uploads[f"{root_prefix}/index.json"] = str(index_file)
+        uploads[f"{root_prefix}/{index_name}"] = str(index_file)
         print(f"planned {len(entries)} EPUB stream(s), {len(uploads)} object(s)")
         if args.apply:
             batch_bucket_files(args.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
