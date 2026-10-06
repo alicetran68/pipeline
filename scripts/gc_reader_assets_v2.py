@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import bisect
+import concurrent.futures
 import json
 import os
 from datetime import date, timedelta
@@ -17,7 +19,7 @@ LIFECYCLE_PATH = "reader-index/reader_lifecycle.json"
 INDEX_PREFIXES = (
     "pages/image/", "pages/pdf/", "pages/document/",
     "documents/text/", "documents/web/", "documents/spreadsheet/", "documents/office/",
-    "chapters/ebook/epub/", "chapters/ebook/chm/", "chapters/",
+    "chapters/ebook/epub/", "chapters/ebook/chm/",
     "media/audio/", "media/video/", "media/swf/", "native/",
 )
 
@@ -41,9 +43,21 @@ def s3_client() -> tuple[object, str]:
 
 
 def list_files(client, bucket: str) -> set[str]:
+    prefixes = ("reader-index/",) + INDEX_PREFIXES
+
+    def list_prefix(prefix: str) -> set[str]:
+        print(f"listing {prefix}", flush=True)
+        result = set()
+        for page in client.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=prefix):
+            result.update(item["Key"] for item in page.get("Contents", []))
+        print(f"listed {prefix}: {len(result)}", flush=True)
+        return result
+
     files = set()
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket):
-        files.update(item["Key"] for item in page.get("Contents", []))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for result in executor.map(list_prefix, prefixes):
+            files.update(result)
     return files
 
 
@@ -77,6 +91,13 @@ def read_lifecycle(client, bucket: str) -> dict:
 
 def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
     references = {path for path in files if path.endswith("/index.json")}
+    ordered_files = sorted(files)
+
+    def add_tree(root: str) -> None:
+        start = bisect.bisect_left(ordered_files, root)
+        end = bisect.bisect_left(ordered_files, root + "\uffff")
+        references.update(ordered_files[start:end])
+
     found_index = False
     for prefix in INDEX_PREFIXES:
         index_paths = [path for path in files
@@ -98,7 +119,9 @@ def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
                     value = entry.get(field)
                     if isinstance(value, str):
                         root = value if field == "root" else value.rsplit("/", 1)[0]
-                        references.update(path for path in files if path == value or path.startswith(root + "/"))
+                        if field != "root":
+                            references.add(value)
+                        add_tree(root + "/")
     if not found_index:
         raise IndexUnavailable("no v2 category index is published")
     return references

@@ -84,3 +84,23 @@ jobs:
             --shard-count 8 \
             --shard-index "${{ matrix.shard }}" \
             --apply
+  finalize:
+    needs: media
+    if: always() && needs.media.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: reader-sidecar
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Merge canonical media indexes
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+          HF_S3_BUCKET: vomebook/reader-assets-v2
+        run: python scripts/finalize_media_indexes.py
