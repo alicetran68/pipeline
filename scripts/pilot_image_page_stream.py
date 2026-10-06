@@ -29,7 +29,10 @@ except ImportError:
 TARGET_BUCKET = "vomebook/reader-assets-v2"
 IMAGE_ROOT = "pages/image"
 SUPPORTED_EXTENSIONS = {"jpg", "jpeg", "bmp", "tif", "tiff", "webp", "png"}
-MAX_WEBP_EDGE = 16_383
+# Keep a margin below the WebP encoder's hard dimension/pixel limits. Very
+# large source JPEGs can fit Pillow's decoder limit but still fail encoding at
+# the old 16,383 edge.
+MAX_WEBP_EDGE = 8_192
 
 
 def parse_args() -> argparse.Namespace:
