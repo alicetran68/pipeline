@@ -1,6 +1,8 @@
 name: Build Reader Office Streams
 
 on:
+  schedule:
+    - cron: "47 3 * * 0"
   workflow_dispatch:
     inputs:
       extension:
@@ -21,12 +23,34 @@ concurrency:
   queue: max
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - run: tar -czf output/office-plan.tgz output/search_data.json state/commits.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-office-plan
+          path: output/office-plan.tgz
+          retention-days: 1
   office-stream:
+    needs: plan
+    if: inputs.extension == '' || inputs.extension == 'all' || inputs.extension == matrix.extension
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 4
       matrix:
         extension: [doc, docx, odt, rtf]
     steps:
@@ -39,20 +63,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libreoffice
       - run: pip install -r scripts/requirements.txt
-      - name: Fetch current source metadata
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: python scripts/fetch_and_parse.py
-      - name: Select requested extension
-        id: select
-        env:
-          REQUESTED_EXTENSION: ${{ inputs.extension || 'all' }}
-          MATRIX_EXTENSION: ${{ matrix.extension }}
-        run: |
-          if [[ "${REQUESTED_EXTENSION}" == "all" || "${REQUESTED_EXTENSION}" == "${MATRIX_EXTENSION}" ]]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else echo "enabled=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-office-plan
+          path: output
+      - run: tar -xzf output/office-plan.tgz
       - name: Build and publish office streams
-        if: steps.select.outputs.enabled == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
