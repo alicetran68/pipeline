@@ -13,7 +13,7 @@ on:
       grace_days:
         description: Days an object must remain orphaned
         required: true
-        default: "3"
+        default: "0"
         type: string
       limit:
         description: Maximum objects deleted in one run; 0 means all
@@ -42,8 +42,8 @@ jobs:
           HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
           HF_S3_BUCKET: vomebook/reader-assets-v2
         run: |
-          [[ "${{ inputs.grace_days || '3' }}" =~ ^[0-9]+$ ]] || exit 1
+          [[ "${{ inputs.grace_days || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          args=(--grace-days "${{ inputs.grace_days || '3' }}" --limit "${{ inputs.limit || '0' }}" --show-paths)
+          args=(--grace-days "${{ inputs.grace_days || '0' }}" --limit "${{ inputs.limit || '0' }}" --show-paths)
           if [[ "${{ inputs.apply }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--apply); fi
           python scripts/gc_reader_assets_v2.py "${args[@]}"
