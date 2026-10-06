@@ -318,7 +318,7 @@ def build_bundle(epub: Path, output: Path, *, fallback: str | None = None,
     output.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(epub) as archive:
         names = set(archive.namelist())
-        container = ET.fromstring(archive.read("META-INF/container.xml"))
+        container = _parse_package_xml(archive.read("META-INF/container.xml"))
         rootfile = next((node for node in container.iter() if _local_name(node) == "rootfile"), None)
         if rootfile is None:
             raise ValueError("EPUB package is missing")
