@@ -16,6 +16,7 @@ from huggingface_hub import HfFileSystem
 from PIL import Image, ImageFile, ImageSequence
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+Image.MAX_IMAGE_PIXELS = 300_000_000
 
 try:
     from .reader_assets import decode_search_payload, relative_path, source_url
