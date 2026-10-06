@@ -34,9 +34,9 @@ class EpubTocTests(unittest.TestCase):
         self.assertEqual(result['toc'], [dict(title='日记', chapter=1, fragment='day', depth=0),
                                          dict(title='一月三日', chapter=1, fragment='day', depth=1)])
 
-    def test_unrecoverable_navigation_fails_instead_of_publishing_placeholder(self):
-        with self.assertRaisesRegex(ValueError, 'cannot be recovered'):
-            self.build('<ncx><navMap><navPoint><navLabel><text>Unknown Text</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
+    def test_unrecoverable_navigation_uses_a_stable_fallback_title(self):
+        result = self.build('<ncx><navMap><navPoint><navLabel><text>Unknown Text</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')
+        self.assertEqual(result['toc'][0]['title'], '章节 1')
 
     def test_missing_navigation_fragment_falls_back_to_chapter_start(self):
         result = self.build('<ncx><navMap><navPoint><navLabel><text>第一卷</text></navLabel><content src="book.xhtml#missing"/></navPoint></navMap></ncx>')

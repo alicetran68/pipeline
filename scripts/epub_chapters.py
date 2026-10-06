@@ -59,6 +59,8 @@ def _local_name(node) -> str:
 
 def _parse_package_xml(raw: bytes):
     """Parse package XML and repair undeclared prefixes used by old EPUBs."""
+    raw = re.sub(rb"\s+xmlns:xmlns\s*=\s*(['\"])urn:[^'\"]*\1", b"", raw,
+                 flags=re.IGNORECASE)
     try:
         return ET.fromstring(raw)
     except ET.ParseError as error:
@@ -191,7 +193,10 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
     for entry in entries:
         record = by_source.get(entry["source_path"])
         if record is None:
-            raise ValueError(f'EPUB TOC target is outside readable spine: {entry["source_path"]}')
+            # Broken packages often put cover/nav pages in the TOC without
+            # putting them in the readable spine. Preserve the actual spine
+            # and omit only the unusable navigation item.
+            continue
         if entry["source_path"] not in documents:
             try:
                 documents[entry["source_path"]] = ET.fromstring(record["clean"])
@@ -201,7 +206,9 @@ def bundle_toc(entries: list[dict], records: list[dict]) -> list[dict]:
         if _placeholder_title(title):
             title = _target_title(record["clean"], entry["fragment"], root=documents[entry["source_path"]])
         if _placeholder_title(title):
-            raise ValueError(f'EPUB TOC title cannot be recovered: {entry["source_path"]}#{entry["fragment"]}')
+            document_title = _document_title(record["clean"])
+            title = (document_title if document_title and not _placeholder_title(document_title)
+                     else f"章节 {record['index']}")
         fragment = entry["fragment"]
         root = documents.get(entry["source_path"])
         if fragment and root is not None and not any(
