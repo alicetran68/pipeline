@@ -68,6 +68,18 @@ class FetchAndParseTests(unittest.TestCase):
         self.assertEqual(result, "目录\n")
         sleep.assert_called_once_with(1)
 
+    def test_repo_sha_falls_back_to_catalog_revision_header(self):
+        response = Mock()
+        response.__enter__ = lambda value: value
+        response.__exit__ = lambda *args: None
+        response.headers = {"X-Repo-Commit": "fallback-sha"}
+
+        with patch.object(self.module, "http_get_json", return_value={}), \
+             patch.object(urllib.request, "urlopen", return_value=response):
+            result = self.module.get_repo_sha("VoiceOfML/VOMEBOOK", "token")
+
+        self.assertEqual(result, "fallback-sha")
+
     def test_main_reports_unchanged_without_generating_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)

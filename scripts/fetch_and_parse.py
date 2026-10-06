@@ -283,6 +283,14 @@ def batch_get_sizes(repo: str, revision: str, paths: list[str], token: str, max_
                         size_map[p] = s
         except Exception as e:
             print(f"  ⚠ paths-info 失败 (batch {batch_num}, {len(batch)}条): {e}")
+            # A single malformed/unsupported path can make the whole request
+            # return 400. Split the batch so valid siblings still get sizes.
+            if len(batch) > 1:
+                midpoint = len(batch) // 2
+                size_map.update(batch_get_sizes(repo, revision, batch[:midpoint], token,
+                                                max_bytes=max(1000, max_bytes // 2)))
+                size_map.update(batch_get_sizes(repo, revision, batch[midpoint:], token,
+                                                max_bytes=max(1000, max_bytes // 2)))
 
         if idx < total:
             time.sleep(0.3)
@@ -363,12 +371,32 @@ def parse_one_line(line: str, repo: str, size_map: dict) -> dict | None:
 def get_repo_sha(repo: str, token: str) -> str:
     """
     通过 HF API 获取仓库最新 commit SHA。
+
+    HF API 被限流时，解析默认分支目录文件的响应头。该响应由同一
+    revision 提供，仍然能保证后续目录下载使用已确认的 commit。
     返回空字符串表示获取失败。
     """
     url = f"{API_DATASETS}/{repo}"
     data = http_get_json(url, token)
     if isinstance(data, dict):
-        return data.get("sha", "")
+        sha = data.get("sha", "")
+        if sha:
+            return sha
+
+    fallback_url = (
+        f"{RAW_BASE}/{repo}/resolve/main/"
+        f"{urllib.parse.quote('直接目录.txt')}"
+    )
+    request = _make_request(fallback_url, token)
+    request.method = "HEAD"
+    try:
+        with _open_with_retries(request, timeout=30) as response:
+            sha = response.headers.get("X-Repo-Commit", "")
+            if sha:
+                print(f"  ↪ API 限流，使用目录响应头确认版本: {sha[:8]}")
+                return sha
+    except Exception as error:
+        print(f"  ⚠ 目录响应头也无法确认版本 [{error}]")
     return ""
 
 
