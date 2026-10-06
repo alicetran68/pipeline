@@ -81,6 +81,9 @@ def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
     for prefix in INDEX_PREFIXES:
         index_paths = [path for path in files
                        if path.startswith(prefix + "index") and path.endswith(".json")]
+        canonical = f"{prefix}index.json"
+        if canonical in index_paths and len(index_paths) > 1:
+            index_paths = [canonical]
         for index_path in index_paths:
             found_index = True
             references.add(index_path)
