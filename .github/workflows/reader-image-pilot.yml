@@ -113,7 +113,7 @@ jobs:
             --apply
   finalize:
     needs: image-stream
-    if: needs.image-stream.result == 'success'
+    if: always() && needs.image-stream.result != 'cancelled'
     runs-on: ubuntu-latest
     concurrency:
       group: reader-sidecar
