@@ -101,10 +101,24 @@ def references_from_indexes(client, bucket: str, files: set[str]) -> set[str]:
     found_index = False
     for prefix in INDEX_PREFIXES:
         index_paths = [path for path in files
-                       if path.startswith(prefix + "index") and path.endswith(".json")]
-        canonical = f"{prefix}index.json"
-        if canonical in index_paths and len(index_paths) > 1:
-            index_paths = [canonical]
+                       if path.startswith(prefix)
+                       and (path == prefix.rstrip("/") + "/index.json"
+                            or path.endswith("/index.json")
+                            or "/index-" in path and path.endswith(".json"))]
+        # A category may have one index per extension. Prefer its canonical
+        # index over sibling shard indexes, but do that per parent directory.
+        grouped = {}
+        for path in index_paths:
+            parent = path.rsplit("/", 1)[0]
+            grouped.setdefault(parent, []).append(path)
+        index_paths = []
+        for parent, candidates in grouped.items():
+            canonical = f"{parent}/index.json"
+            # Shard indexes remain as resumable checkpoints even after the
+            # canonical index is published. Protect the checkpoint files
+            # themselves, but do not treat their old object entries as live.
+            references.update(candidates)
+            index_paths.extend([canonical] if canonical in candidates else candidates)
         for index_path in index_paths:
             found_index = True
             references.add(index_path)
