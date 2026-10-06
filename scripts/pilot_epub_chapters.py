@@ -18,11 +18,13 @@ from huggingface_hub import HfFileSystem
 try:
     from .convert_reader_assets import convert_item
     from .epub_chapters import build_bundle, bundle_version
+    from .recover_chm import recover as recover_chm
     from .reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from .shared import batch_bucket_files_with_retry
 except ImportError:
     from convert_reader_assets import convert_item
     from epub_chapters import build_bundle, bundle_version
+    from recover_chm import recover as recover_chm
     from reader_assets import bucket_conversion_contract, decode_search_payload, relative_path, source_url
     from shared import batch_bucket_files_with_retry
 
@@ -99,20 +101,37 @@ def build_one(item: dict, work: Path, token: str | None, bucket: str) -> tuple[d
         if contract is None:
             raise ValueError("no CHM conversion contract")
         profile, mode, output_name = contract
-        converted = convert_item({
-            "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
-            "extension": extension, "source_revision": item["revision"], "source_url": source_url(
-                item["repo"], item["revision"], item["path"]), "source_bytes": item["source_bytes"],
-            "profile": profile, "reader_mode": mode, "output_name": output_name,
-        }, work / "converted")
-        if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
-            raise RuntimeError(converted.get("chapter_bundle_error") or "CHM chapter stream was not produced")
         converted_root = work / "converted"
-        source_chapter_dir = converted_root / Path(converted["chapter_manifest"]).parent
-        bundle = work / "bundle"
-        shutil.copytree(source_chapter_dir, bundle)
-        manifest = json.loads((bundle / "chapter-manifest.json").read_text(encoding="utf-8"))
-        native_source = converted_root / converted["path"]
+        try:
+            converted = convert_item({
+                "key": f"{item['repo']}\0{item['path']}", "repo": item["repo"], "path": item["path"],
+                "extension": extension, "source_revision": item["revision"], "source_url": source_url(
+                    item["repo"], item["revision"], item["path"]), "source_bytes": item["source_bytes"],
+                "profile": profile, "reader_mode": mode, "output_name": output_name,
+            }, converted_root)
+            if not converted.get("chapter_manifest") or converted.get("chapter_bundle_error"):
+                raise RuntimeError(converted.get("chapter_bundle_error") or "CHM chapter stream was not produced")
+            source_chapter_dir = converted_root / Path(converted["chapter_manifest"]).parent
+            native_source = converted_root / converted["path"]
+            bundle = work / "bundle"
+            shutil.copytree(source_chapter_dir, bundle)
+            manifest = json.loads((bundle / "chapter-manifest.json").read_text(encoding="utf-8"))
+        except Exception as primary_error:
+            # Calibre and its CHM navigation repair are not reliable for every
+            # legacy container. Recover static pages directly, then feed the
+            # repaired EPUB through the same chapter-stream builder.
+            recovered = work / "recovered.epub"
+            try:
+                recover_chm(source, recovered, Path(item["path"]).stem)
+                bundle = work / "bundle"
+                manifest = build_bundle(recovered, bundle)
+                native_source = recovered
+                print(f"CHM recovery fallback succeeded: {item['repo']}/{item['path']}")
+            except Exception as recovery_error:
+                raise RuntimeError(
+                    f"CHM conversion failed ({type(primary_error).__name__}: {primary_error}); "
+                    f"recovery failed ({type(recovery_error).__name__}: {recovery_error})"
+                ) from recovery_error
         native_fallback = f"native/ebook/chm/{source_digest}/document.epub"
     else:
         chapter_source = source
