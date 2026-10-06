@@ -59,7 +59,7 @@ def _local_name(node) -> str:
 
 def _parse_package_xml(raw: bytes):
     """Parse package XML and repair undeclared prefixes used by old EPUBs."""
-    raw = re.sub(rb"\s+xmlns:xmlns\s*=\s*(['\"])urn:[^'\"]*\1", b"", raw,
+    raw = re.sub(rb"\s+xmlns:xmlns\s*=\s*(['\"])[^'\"]*\1", b"", raw,
                  flags=re.IGNORECASE)
     try:
         return ET.fromstring(raw)
