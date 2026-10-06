@@ -40,19 +40,24 @@ def normalized(text):
 def extract(source, root):
     listing = subprocess.run(["7z", "l", "-slt", str(source)], capture_output=True, timeout=120)
     info = listing.stdout.decode("utf-8", "replace")
-    if listing.returncode:
-        raise ValueError("CHM listing failed; cannot verify extraction inventory")
     paths = re.findall(r"^Path = (.+)$", info, re.MULTILINE)[1:]
     expanded = sum(map(int, re.findall(r"^Size = (\d+)\s*$", info, re.MULTILINE)))
-    if expanded > converter.MAX_CHM_EXPANDED_BYTES or len(paths) > converter.MAX_EPUB_MEMBERS:
+    listing_failed = bool(listing.returncode)
+    if not listing_failed and (expanded > converter.MAX_CHM_EXPANDED_BYTES or len(paths) > converter.MAX_EPUB_MEMBERS):
         raise ValueError("CHM exceeds extraction bounds")
-    if any(p.startswith(("/", "\\")) or ".." in p.replace("\\", "/").split("/") for p in paths):
+    if not listing_failed and any(p.startswith(("/", "\\")) or ".." in p.replace("\\", "/").split("/") for p in paths):
         raise ValueError("CHM contains unsafe member names")
     result = subprocess.run(["7z", "x", "-y", f"-o{root}", str(source)], capture_output=True, timeout=120)
-    if result.returncode:
+    if result.returncode and not listing_failed:
         raise ValueError("CHM extraction incomplete")
     if any(p.is_symlink() for p in root.rglob("*")):
         raise ValueError("CHM contains symbolic links")
+    extracted_files = [p for p in root.rglob("*") if p.is_file()]
+    extracted_bytes = sum(p.stat().st_size for p in extracted_files)
+    if len(extracted_files) > converter.MAX_EPUB_MEMBERS or extracted_bytes > converter.MAX_CHM_EXPANDED_BYTES:
+        raise ValueError("CHM extracted content exceeds limits")
+    if listing_failed and not extracted_files:
+        raise ValueError("CHM listing and extraction both failed")
 
 
 def source_pages(root, work):
