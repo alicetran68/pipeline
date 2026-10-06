@@ -20,12 +20,33 @@ concurrency:
   queue: max
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - run: tar -czf output/ebook-plan.tgz output/search_data.json state/commits.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-ebook-plan
+          path: output/ebook-plan.tgz
+          retention-days: 1
   epub-stream:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 8
       matrix:
         extension: [epub, mobi, azw3, fb2, chm]
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -43,11 +64,11 @@ jobs:
       - name: Install CHM extraction tools
         if: matrix.extension == 'chm'
         run: sudo apt-get install -y --no-install-recommends p7zip-full
-      - name: Fetch current source metadata
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: python scripts/fetch_and_parse.py
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-ebook-plan
+          path: output
+      - run: tar -xzf output/ebook-plan.tgz
       - name: Build and publish ebook chapter streams
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

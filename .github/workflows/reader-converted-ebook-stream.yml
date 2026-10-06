@@ -26,12 +26,33 @@ concurrency:
   queue: max
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - run: tar -czf output/converted-ebook-plan.tgz output/search_data.json state/commits.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-converted-ebook-plan
+          path: output/converted-ebook-plan.tgz
+          retention-days: 1
   ebook-stream:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 3
       matrix:
         extension: [mobi, azw3, fb2]
     steps:
@@ -44,11 +65,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends calibre
       - run: pip install -r scripts/requirements.txt
-      - name: Fetch current source metadata
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: python scripts/fetch_and_parse.py
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-converted-ebook-plan
+          path: output
+      - run: tar -xzf output/converted-ebook-plan.tgz
       - name: Select requested extension
         id: select
         env:
