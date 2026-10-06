@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   plan:
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -35,6 +37,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
+      - name: Plan pending workers
+        id: matrix
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/plan_reader_stream_matrix.py --kind media --extension "${{ inputs.kind || 'all' }}" --output output/media-matrix.json
+          echo "matrix=$(cat output/media-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/media-plan.tgz output/search_data.json state/commits.json
       - uses: actions/upload-artifact@v7
         with:
@@ -49,8 +58,7 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        kind: [audio, video, swf]
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -68,8 +76,8 @@ jobs:
       - name: Select requested media kind
         id: select
         env:
-          REQUESTED_KIND: ${{ inputs.kind || 'all' }}
-          MATRIX_KIND: ${{ matrix.kind }}
+          REQUESTED_KIND: all
+          MATRIX_KIND: ${{ matrix.extension }}
         run: |
           if [[ "${REQUESTED_KIND}" == "all" || "${REQUESTED_KIND}" == "${MATRIX_KIND}" ]]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else echo "enabled=false" >> "$GITHUB_OUTPUT"; fi
       - name: Build and publish media streams
@@ -79,7 +87,7 @@ jobs:
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           python scripts/pilot_media_stream.py \
-            --kind "${{ matrix.kind }}" \
+            --kind "${{ matrix.extension }}" \
             --limit "${{ inputs.limit || '0' }}" \
             --shard-count 8 \
             --shard-index "${{ matrix.shard }}" \

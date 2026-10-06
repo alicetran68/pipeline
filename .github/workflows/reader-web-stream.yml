@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   plan:
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -35,6 +37,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           FORCE_SYNC: "true"
         run: python scripts/fetch_and_parse.py
+      - name: Plan pending workers
+        id: matrix
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python scripts/plan_reader_stream_matrix.py --kind web --extension "${{ inputs.extension || 'all' }}" --output output/web-matrix.json
+          echo "matrix=$(cat output/web-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/web-plan.tgz output/search_data.json state/commits.json
       - uses: actions/upload-artifact@v7
         with:
@@ -49,7 +58,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        extension: [html, htm, mht, mhtml]
+        include: ${{ fromJSON(needs.plan.outputs.matrix).include }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
