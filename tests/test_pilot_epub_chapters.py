@@ -6,9 +6,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import pilot_epub_chapters
+from scripts.epub_chapters import _parse_package_xml
 
 
 class ChmChapterPilotTests(unittest.TestCase):
+    def test_package_repair_does_not_declare_reserved_xmlns_prefix(self):
+        raw = (b'<package xmlns="urn:opf">'
+               b'<metadata xmlns:dc="urn:dc"><dc:date xsi:type="dcterms:W3CDTF">x</dc:date>'
+               b'</metadata></package>')
+        root = _parse_package_xml(raw)
+        self.assertEqual(root.tag, "{urn:opf}package")
+
     def test_chm_publishes_chapter_tree_and_native_epub_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)

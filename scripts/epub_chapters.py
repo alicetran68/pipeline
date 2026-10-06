@@ -73,7 +73,10 @@ def _parse_package_xml(raw: bytes):
         root_tag = match.group(1)
         declared = set(re.findall(r"xmlns:([A-Za-z_][\w.-]*)\s*=", match.group(0)))
         used = set(re.findall(r"(?<!xmlns:)([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*", text))
-        missing = sorted(prefix for prefix in used if prefix not in declared and prefix != root_tag)
+        # Namespace declaration attributes also match the prefix scanner as
+        # ``xmlns:name``. The reserved ``xmlns`` prefix must never be added.
+        missing = sorted(prefix for prefix in used
+                         if prefix not in declared and prefix not in {root_tag, "xmlns"})
         if not missing:
             raise
         replacement = match.group(0)[:-1] + "".join(
