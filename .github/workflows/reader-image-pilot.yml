@@ -36,7 +36,28 @@ concurrency:
   queue: max
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - run: tar -czf output/image-plan.tgz output/search_data.json state/commits.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reader-image-plan
+          path: output/image-plan.tgz
+          retention-days: 1
   image-stream:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -52,11 +73,11 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
-      - name: Fetch current source metadata
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          FORCE_SYNC: "true"
-        run: python scripts/fetch_and_parse.py
+      - uses: actions/download-artifact@v8
+        with:
+          name: reader-image-plan
+          path: output
+      - run: tar -xzf output/image-plan.tgz
       - name: Select requested extension
         id: select
         env:
