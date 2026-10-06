@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +26,8 @@ except ImportError:
 
 BUCKET = "vomebook/reader-assets-v2"
 EXTENSIONS = {"doc", "docx", "odt", "rtf"}
+CHECKPOINT_SIZE = 25
+LIBREOFFICE_TIMEOUT_SECONDS = 600
 
 
 def args():
@@ -56,6 +59,46 @@ def index(bucket, root, token):
         return {"files": []}
 
 
+def run_libreoffice(command: list[str], profile: Path) -> None:
+    """Run one conversion in an isolated profile and clean up hung children."""
+    profile.mkdir(parents=True, exist_ok=True)
+    full_command = [command[0], f"-env:UserInstallation={profile.as_uri()}", *command[1:]]
+    process = subprocess.Popen(
+        full_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=LIBREOFFICE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise subprocess.TimeoutExpired(full_command, LIBREOFFICE_TIMEOUT_SECONDS) from error
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, full_command, stdout, stderr)
+
+
+def publish_checkpoint(bucket: str, category: str, root: Path, merged: dict,
+                       failures: dict, uploads: dict[str, str], token: str | None,
+                       apply: bool) -> None:
+    index_file = root / "index.json"
+    index_file.write_text(json.dumps({
+        "version": 1,
+        "kind": "office-document-stream-index",
+        "files": [merged[key] for key in sorted(merged)],
+        "failures": [failures[key] for key in sorted(failures) if key not in merged],
+    }, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    uploads[f"{category}/index.json"] = str(index_file)
+    if apply:
+        batch_bucket_files(bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token)
+        uploads.clear()
+
+
 def records(path, revisions, extension):
     rows = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     output = []
@@ -80,12 +123,12 @@ def build(item, work, token, bucket):
     elif ext == "doc":
         out = work / "docx"
         out.mkdir()
-        subprocess.run(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)], check=True, timeout=600)
+        run_libreoffice(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)], work / "libreoffice-profile")
         output, name = out / "source.docx", "document.docx"
     else:
         out = work / "html"
         out.mkdir()
-        subprocess.run(["libreoffice", "--headless", "--convert-to", "html", "--outdir", str(out), str(source)], check=True, timeout=600)
+        run_libreoffice(["libreoffice", "--headless", "--convert-to", "html", "--outdir", str(out), str(source)], work / "libreoffice-profile")
         generated = out / f"source.html"
         output = work / "document.html"
         output.write_text(sanitize_html(decode_html_source(generated), allow_relative=False), encoding="utf-8")
@@ -110,28 +153,46 @@ def main():
     entries, uploads = [], {}
     with tempfile.TemporaryDirectory(prefix="reader-office-") as directory:
         root = Path(directory)
+        if ext == "all":
+            raise ValueError("office worker must process one extension")
+        category = f"documents/office/{ext}"
+        old = index(a.bucket, category, token)
+        merged = {e.get("key"): e for e in old.get("files", [])
+                  if isinstance(e, dict) and e.get("key")}
+        failures = {e.get("key"): e for e in old.get("failures", [])
+                    if isinstance(e, dict) and e.get("key")}
+        checkpoint_count = 0
         for number, item in enumerate(selected):
             if a.limit and len(entries) >= a.limit: break
-            category = f"documents/office/{item['extension']}"
-            old = index(a.bucket, category, token)
             key = f"{item['repo']}\0{item['path']}"
-            if any(e.get("key") == key and e.get("source_revision") == item["revision"] for e in old["files"]): continue
+            if merged.get(key, {}).get("source_revision") == item["revision"]:
+                continue
             try: entry, files = build(item, root / str(number), token, a.bucket)
             except Exception as error:
-                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}"); continue
-            entries.append(entry); uploads.update(files)
-        if not entries: print("no pending office sources"); return 0
-        by_category = {}
-        for entry in entries: by_category.setdefault(f"documents/office/{entry['extension']}", []).append(entry)
-        for category, added in by_category.items():
-            old = index(a.bucket, category, token); merged = {e.get("key"): e for e in old["files"] if isinstance(e, dict)}; merged.update({e["key"]: e for e in added})
-            out = root / category.replace("/", "_") / "index.json"; out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps({"version": 1, "kind": "office-document-stream-index", "files": [merged[k] for k in sorted(merged)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-            uploads[f"{category}/index.json"] = str(out)
-        print(f"planned {len(entries)} office stream(s), {len(uploads)} object(s)")
-        if a.apply:
-            batch_bucket_files(a.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token); print(f"published {len(uploads)} object(s) to {a.bucket}")
-        else: print("report-only; pass --apply to publish")
+                failures[key] = {
+                    "key": key, "repo": item["repo"], "path": item["path"],
+                    "source_revision": item["revision"],
+                    "error": f"{type(error).__name__}: {error}"[:1000],
+                }
+                checkpoint_count += 1
+                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
+            else:
+                entries.append(entry)
+                merged[key] = entry
+                failures.pop(key, None)
+                uploads.update(files)
+                checkpoint_count += 1
+            if checkpoint_count >= CHECKPOINT_SIZE:
+                publish_checkpoint(a.bucket, category, root, merged, failures, uploads, token, a.apply)
+                checkpoint_count = 0
+        if checkpoint_count or entries or failures:
+            publish_checkpoint(a.bucket, category, root, merged, failures, uploads, token, a.apply)
+        if not entries and not failures:
+            print("no pending office sources")
+            return 0
+        print(f"processed {len(entries)} office stream(s), failures={len(failures)}")
+        if not a.apply:
+            print("report-only; pass --apply to publish")
     return 0
 
 
