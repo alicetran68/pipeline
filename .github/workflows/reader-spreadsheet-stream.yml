@@ -86,6 +86,7 @@ jobs:
         if: steps.select.outputs.enabled == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
           python scripts/pilot_spreadsheet_stream.py --extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply
