@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import msoffcrypto
 import tempfile
 import urllib.request
 from pathlib import Path
@@ -64,7 +65,19 @@ def build(item, work, token, bucket):
     work.mkdir(parents=True, exist_ok=True); source = work / f"source.{item['extension']}"
     download(source_url(item["repo"], item["revision"], item["path"]), source, token)
     source_hash = hashlib.sha256(source.read_bytes()).hexdigest(); output = work / "document.html"
-    convert_spreadsheet_to_html(source, output, work, {"extension": item["extension"], "path": item["path"]})
+    conversion_source = source
+    password = os.environ.get("READER_CONVERSION_PASSWORD")
+    with source.open("rb") as stream:
+        encrypted = msoffcrypto.OfficeFile(stream)
+        if encrypted.is_encrypted():
+            if not password:
+                raise RuntimeError("encrypted spreadsheet requires READER_CONVERSION_PASSWORD")
+            decrypted = work / f"decrypted.{item['extension']}"
+            encrypted.load_key(password=password)
+            with decrypted.open("wb") as target:
+                encrypted.decrypt(target)
+            conversion_source = decrypted
+    convert_spreadsheet_to_html(conversion_source, output, work, {"extension": item["extension"], "path": item["path"]})
     digest = hashlib.sha256(output.read_bytes()).hexdigest(); root = f"documents/spreadsheet/{item['extension']}/{source_hash}"
     obj, manifest_path = f"{root}/document.html", f"{root}/worksheet-manifest.json"
     manifest = work / "worksheet-manifest.json"
@@ -78,22 +91,48 @@ def main():
     ext = a.extension.lower().lstrip(".")
     if ext != "all" and ext not in EXTENSIONS: raise ValueError(f"unsupported spreadsheet extension: {ext}")
     token = os.environ.get("HF_TOKEN"); revisions = json.loads(a.revisions.read_text(encoding="utf-8")); selected = select(a.search_data, revisions, ext)
-    entries, uploads = [], {}
+    entries, uploads, failures = [], {}, {}
     with tempfile.TemporaryDirectory(prefix="reader-spreadsheet-") as directory:
         root = Path(directory)
         for number, item in enumerate(selected):
-            if a.limit and len(entries) >= a.limit: break
-            category = f"documents/spreadsheet/{item['extension']}"; old = read_index(a.bucket, category, token); key = f"{item['repo']}\0{item['path']}"
-            if any(e.get("key") == key and e.get("source_revision") == item["revision"] for e in old["files"]): continue
-            try: entry, files = build(item, root / str(number), token, a.bucket)
-            except Exception as error: print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}"); continue
-            entries.append(entry); uploads.update(files)
-        if not entries: print("no pending spreadsheet sources"); return 0
+            if a.limit and len(entries) >= a.limit:
+                break
+            category = f"documents/spreadsheet/{item['extension']}"
+            old = read_index(a.bucket, category, token)
+            key = f"{item['repo']}\0{item['path']}"
+            handled = list(old.get("files", [])) + list(old.get("failures", []))
+            if any(e.get("key") == key and e.get("source_revision") == item["revision"]
+                   for e in handled if isinstance(e, dict)):
+                continue
+            try:
+                entry, files = build(item, root / str(number), token, a.bucket)
+            except Exception as error:
+                failures[key] = {
+                    "key": key, "repo": item["repo"], "path": item["path"],
+                    "extension": item["extension"], "source_revision": item["revision"],
+                    "error": f"{type(error).__name__}: {error}"[:1000],
+                }
+                print(f"failed: {item['repo']}/{item['path']}: {type(error).__name__}: {error}")
+                continue
+            entries.append(entry)
+            uploads.update(files)
+        if not entries and not failures:
+            print("no pending spreadsheet sources"); return 0
         by_category = {}
         for entry in entries: by_category.setdefault(f"documents/spreadsheet/{entry['extension']}", []).append(entry)
+        for failure in failures.values():
+            by_category.setdefault(f"documents/spreadsheet/{failure['extension']}", [])
         for category, added in by_category.items():
-            old = read_index(a.bucket, category, token); merged = {e.get("key"): e for e in old["files"] if isinstance(e, dict)}; merged.update({e["key"]: e for e in added})
-            out = root / category.replace("/", "_") / "index.json"; out.parent.mkdir(parents=True, exist_ok=True); out.write_text(json.dumps({"version": 1, "kind": "spreadsheet-html-stream-index", "files": [merged[k] for k in sorted(merged)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            old = read_index(a.bucket, category, token)
+            merged = {e.get("key"): e for e in old["files"] if isinstance(e, dict)}
+            merged.update({e["key"]: e for e in added})
+            category_failures = {e.get("key"): e for e in old.get("failures", []) if isinstance(e, dict)}
+            category_failures.update({e["key"]: e for e in failures.values()
+                                      if f"documents/spreadsheet/{e['extension']}" == category})
+            category_failures = {k: v for k, v in category_failures.items() if k not in merged}
+            out = root / category.replace("/", "_") / "index.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"version": 1, "kind": "spreadsheet-html-stream-index", "files": [merged[k] for k in sorted(merged)], "failures": [category_failures[k] for k in sorted(category_failures)]}, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
             uploads[f"{category}/index.json"] = str(out)
         print(f"planned {len(entries)} spreadsheet stream(s), {len(uploads)} object(s)")
         if a.apply: batch_bucket_files(a.bucket, add=[(local, remote) for remote, local in sorted(uploads.items())], token=token); print(f"published {len(uploads)} object(s) to {a.bucket}")

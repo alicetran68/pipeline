@@ -92,6 +92,15 @@ def root_for(kind: str, extension: str) -> str:
     }[kind]
 
 
+def completed_entries(index: dict) -> dict[str, str]:
+    completed = {}
+    for field in ("files", "failures"):
+        for entry in index.get(field, []):
+            if isinstance(entry, dict) and entry.get("key"):
+                completed[entry["key"]] = entry.get("source_revision")
+    return completed
+
+
 def main() -> int:
     a = args()
     config = KINDS[a.kind]
@@ -109,11 +118,10 @@ def main() -> int:
         candidates = [item for item in records if item["extension"] == extension]
         if config["sharded"]:
             canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            canonical_done = {x.get("key"): x.get("source_revision")
-                              for x in canonical.get("files", []) if isinstance(x, dict)}
+            canonical_done = completed_entries(canonical)
             for shard in range(a.shard_count):
                 index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
-                completed = {x.get("key"): x.get("source_revision") for x in index.get("files", []) if isinstance(x, dict)}
+                completed = completed_entries(index)
                 completed.update(canonical_done)
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                            int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
@@ -121,7 +129,7 @@ def main() -> int:
                     include.append({"extension": extension, "shard": shard})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            completed = {x.get("key"): x.get("source_revision") for x in index.get("files", []) if isinstance(x, dict)}
+            completed = completed_entries(index)
             if any(completed.get(x["key"]) != x["revision"] for x in candidates):
                 include.append({"extension": extension})
     a.output.parent.mkdir(parents=True, exist_ok=True)

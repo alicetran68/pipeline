@@ -41,6 +41,7 @@ jobs:
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
           python scripts/plan_reader_stream_matrix.py --kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json
           echo "matrix=$(cat output/spreadsheet-matrix.json)" >> "$GITHUB_OUTPUT"
