@@ -108,9 +108,13 @@ def main() -> int:
     for extension in sorted(wanted):
         candidates = [item for item in records if item["extension"] == extension]
         if config["sharded"]:
+            canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
+            canonical_done = {x.get("key"): x.get("source_revision")
+                              for x in canonical.get("files", []) if isinstance(x, dict)}
             for shard in range(a.shard_count):
                 index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
                 completed = {x.get("key"): x.get("source_revision") for x in index.get("files", []) if isinstance(x, dict)}
+                completed.update(canonical_done)
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                            int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
                 if pending:
