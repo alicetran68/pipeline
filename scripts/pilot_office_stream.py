@@ -112,6 +112,11 @@ def converted_output(directory: Path, extension: str) -> Path:
     raise RuntimeError(f"LibreOffice produced multiple .{extension} outputs: {candidates}")
 
 
+def looks_like_html(source: Path) -> bool:
+    sample = source.read_bytes()[:4096].lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    return sample.startswith((b"<!doctype html", b"<html", b"<body"))
+
+
 def records(path, revisions, extension):
     rows = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     output = []
@@ -133,6 +138,10 @@ def build(item, work, token, bucket):
     ext = item["extension"]
     if ext == "docx":
         output, name = source, "document.docx"
+    elif ext == "doc" and looks_like_html(source):
+        output = work / "document.html"
+        output.write_text(sanitize_html(decode_html_source(source), allow_relative=False), encoding="utf-8")
+        name = "document.html"
     elif ext == "doc":
         out = work / "docx"
         out.mkdir()

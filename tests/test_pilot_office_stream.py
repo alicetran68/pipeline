@@ -7,6 +7,12 @@ from scripts import pilot_office_stream
 
 
 class OfficeStreamTests(unittest.TestCase):
+    def test_detects_html_saved_with_doc_extension(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.doc"
+            source.write_bytes(b"\xef\xbb\xbf<html><body>text</body></html>")
+            self.assertTrue(pilot_office_stream.looks_like_html(source))
+
     def test_converted_output_accepts_normalized_basename(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "normalized.docx"
