@@ -99,6 +99,19 @@ def publish_checkpoint(bucket: str, category: str, root: Path, merged: dict,
         uploads.clear()
 
 
+def converted_output(directory: Path, extension: str) -> Path:
+    """Find LibreOffice's output even when it normalizes the input basename."""
+    candidates = sorted(directory.glob(f"*.{extension}"))
+    if len(candidates) == 1:
+        return candidates[0]
+    expected = directory / f"source.{extension}"
+    if expected.is_file():
+        return expected
+    if not candidates:
+        raise FileNotFoundError(f"LibreOffice produced no .{extension} output in {directory}")
+    raise RuntimeError(f"LibreOffice produced multiple .{extension} outputs: {candidates}")
+
+
 def records(path, revisions, extension):
     rows = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     output = []
@@ -124,12 +137,12 @@ def build(item, work, token, bucket):
         out = work / "docx"
         out.mkdir()
         run_libreoffice(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)], work / "libreoffice-profile")
-        output, name = out / "source.docx", "document.docx"
+        output, name = converted_output(out, "docx"), "document.docx"
     else:
         out = work / "html"
         out.mkdir()
         run_libreoffice(["libreoffice", "--headless", "--convert-to", "html", "--outdir", str(out), str(source)], work / "libreoffice-profile")
-        generated = out / f"source.html"
+        generated = converted_output(out, "html")
         output = work / "document.html"
         output.write_text(sanitize_html(decode_html_source(generated), allow_relative=False), encoding="utf-8")
         name = "document.html"

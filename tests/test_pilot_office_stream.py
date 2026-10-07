@@ -7,6 +7,12 @@ from scripts import pilot_office_stream
 
 
 class OfficeStreamTests(unittest.TestCase):
+    def test_converted_output_accepts_normalized_basename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "normalized.docx"
+            output.write_bytes(b"docx")
+            self.assertEqual(pilot_office_stream.converted_output(Path(temporary), "docx"), output)
+
     def test_libreoffice_uses_private_profile(self):
         process = Mock(returncode=0)
         process.communicate.return_value = ("", "")
