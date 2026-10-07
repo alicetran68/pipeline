@@ -7,6 +7,17 @@ from scripts import pilot_office_stream
 
 
 class OfficeStreamTests(unittest.TestCase):
+    def test_doc_text_fallback_writes_sanitized_html(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(pilot_office_stream.subprocess, "run") as run:
+            run.return_value.stdout = "legacy text".encode()
+            source = Path(temporary) / "source.doc"
+            output = Path(temporary) / "document.html"
+            source.write_bytes(b"legacy")
+            pilot_office_stream.doc_to_html_fallback(source, output)
+            self.assertIn("legacy text", output.read_text(encoding="utf-8"))
+            self.assertEqual(run.call_args.args[0][:3], ["antiword", "-m", "UTF-8.txt"])
+
     def test_detects_html_saved_with_doc_extension(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source.doc"

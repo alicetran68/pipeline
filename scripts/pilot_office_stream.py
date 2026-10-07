@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import hashlib
 import json
 import os
@@ -117,6 +118,19 @@ def looks_like_html(source: Path) -> bool:
     return sample.startswith((b"<!doctype html", b"<html", b"<body"))
 
 
+def doc_to_html_fallback(source: Path, output: Path) -> None:
+    """Extract readable text from legacy DOC files LibreOffice cannot open."""
+    result = subprocess.run(
+        ["antiword", "-m", "UTF-8.txt", str(source)],
+        check=True,
+        capture_output=True,
+        timeout=180,
+    )
+    text = result.stdout.decode("utf-8", "replace")
+    document = "<html><body><pre>" + html.escape(text) + "</pre></body></html>"
+    output.write_text(sanitize_html(document, allow_relative=False), encoding="utf-8")
+
+
 def records(path, revisions, extension):
     rows = decode_search_payload(json.loads(path.read_text(encoding="utf-8")))
     output = []
@@ -145,8 +159,13 @@ def build(item, work, token, bucket):
     elif ext == "doc":
         out = work / "docx"
         out.mkdir()
-        run_libreoffice(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)], work / "libreoffice-profile")
-        output, name = converted_output(out, "docx"), "document.docx"
+        try:
+            run_libreoffice(["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out), str(source)], work / "libreoffice-profile")
+            output, name = converted_output(out, "docx"), "document.docx"
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            output = work / "document.html"
+            doc_to_html_fallback(source, output)
+            name = "document.html"
     else:
         out = work / "html"
         out.mkdir()
