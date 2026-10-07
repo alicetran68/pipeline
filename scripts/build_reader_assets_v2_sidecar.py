@@ -92,7 +92,12 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
         add_index(files, payload, {extension: "e"}, assets_bucket, chapters=True)
     for kind, mode in (("audio", "a"), ("video", "v"), ("swf", "f")):
         payload = read_json(fs, assets_bucket, f"media/{kind}/index.json")
-        add_index(files, payload, {kind: mode}, assets_bucket)
+        for entry in payload.get("files", []):
+            if not isinstance(entry, dict) or not entry.get("key"):
+                continue
+            object_path = entry.get("object")
+            if isinstance(object_path, str):
+                files[entry["key"]] = {"s": 2, "m": mode, "p": object_path, "b": assets_bucket}
 
     derived = read_json(fs, pdf_bucket, derived_path)
     for entry in derived.get("files", []):
