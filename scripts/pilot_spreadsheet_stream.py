@@ -34,6 +34,7 @@ def parse_args():
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--bucket", default=BUCKET)
     p.add_argument("--apply", action="store_true")
+    p.add_argument("--retry-failures", action="store_true")
     return p.parse_args()
 
 
@@ -100,7 +101,9 @@ def main():
             category = f"documents/spreadsheet/{item['extension']}"
             old = read_index(a.bucket, category, token)
             key = f"{item['repo']}\0{item['path']}"
-            handled = list(old.get("files", [])) + list(old.get("failures", []))
+            handled = list(old.get("files", []))
+            if not a.retry_failures:
+                handled += list(old.get("failures", []))
             if any(e.get("key") == key and e.get("source_revision") == item["revision"]
                    for e in handled if isinstance(e, dict)):
                 continue

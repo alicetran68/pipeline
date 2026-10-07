@@ -95,4 +95,6 @@ jobs:
           READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
           [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
-          python scripts/pilot_spreadsheet_stream.py --extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply
+          args=(--extension "${{ matrix.extension }}" --limit "${{ inputs.limit || '0' }}" --apply)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/pilot_spreadsheet_stream.py "${args[@]}"
