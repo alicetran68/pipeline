@@ -96,9 +96,9 @@ def build(fs: HfFileSystem, assets_bucket: str, pdf_bucket: str, derived_path: s
 
     derived = read_json(fs, pdf_bucket, derived_path)
     for entry in derived.get("files", []):
-        if not isinstance(entry, dict) or not entry.get("key") or not entry.get("path"):
+        if not isinstance(entry, dict) or not entry.get("key") or not entry.get("new_path"):
             continue
-        files[entry["key"]] = {"s": 2, "m": "p", "p": entry["path"], "b": pdf_bucket}
+        files[entry["key"]] = {"s": 2, "m": "p", "p": entry["new_path"], "b": pdf_bucket}
     return {"v": 1, "f": dict(sorted(files.items()))}
 
 
