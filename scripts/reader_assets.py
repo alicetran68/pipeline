@@ -11,7 +11,7 @@ from pathlib import Path
 MANIFEST_VERSION = 1
 CHAPTER_MANIFEST_VERSION = 1
 READER_ASSETS_REPO = "vomebook/Reader-Assets"
-READER_ASSETS_BUCKET = "vomebook/pdf-pages"
+READER_ASSETS_BUCKET = "vomebook/reader-assets-v2"
 MANIFEST_NAME = "manifest.json"
 # Chapter manifests make multi-file books cheap to open: the Reader fetches the
 # manifest and nearby chapters instead of downloading the complete archive.
