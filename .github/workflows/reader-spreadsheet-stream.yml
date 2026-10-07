@@ -14,6 +14,11 @@ on:
         required: true
         default: "0"
         type: string
+      retry_failures:
+        description: Retry previously recorded failures
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: reader-spreadsheet
@@ -41,9 +46,10 @@ jobs:
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          READER_CONVERSION_PASSWORD: ${{ secrets.READER_CONVERSION_PASSWORD }}
         run: |
-          python scripts/plan_reader_stream_matrix.py --kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json
+          args=(--kind spreadsheet --extension "${{ inputs.extension || 'all' }}" --output output/spreadsheet-matrix.json)
+          if [[ "${{ inputs.retry_failures }}" == "true" ]]; then args+=(--retry-failures); fi
+          python scripts/plan_reader_stream_matrix.py "${args[@]}"
           echo "matrix=$(cat output/spreadsheet-matrix.json)" >> "$GITHUB_OUTPUT"
       - run: tar -czf output/spreadsheet-plan.tgz output/search_data.json state/commits.json
       - uses: actions/upload-artifact@v7

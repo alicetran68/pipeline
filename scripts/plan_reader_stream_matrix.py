@@ -38,6 +38,7 @@ def args() -> argparse.Namespace:
     p.add_argument("--bucket", default="vomebook/reader-assets-v2")
     p.add_argument("--shard-count", type=int, default=8)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--retry-failures", action="store_true")
     return p.parse_args()
 
 
@@ -92,9 +93,10 @@ def root_for(kind: str, extension: str) -> str:
     }[kind]
 
 
-def completed_entries(index: dict) -> dict[str, str]:
+def completed_entries(index: dict, retry_failures: bool = False) -> dict[str, str]:
     completed = {}
-    for field in ("files", "failures"):
+    fields = ("files",) if retry_failures else ("files", "failures")
+    for field in fields:
         for entry in index.get(field, []):
             if isinstance(entry, dict) and entry.get("key"):
                 completed[entry["key"]] = entry.get("source_revision")
@@ -118,10 +120,10 @@ def main() -> int:
         candidates = [item for item in records if item["extension"] == extension]
         if config["sharded"]:
             canonical = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            canonical_done = completed_entries(canonical)
+            canonical_done = completed_entries(canonical, a.retry_failures)
             for shard in range(a.shard_count):
                 index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index-{shard:02d}.json")
-                completed = completed_entries(index)
+                completed = completed_entries(index, a.retry_failures)
                 completed.update(canonical_done)
                 pending = [x for x in candidates if completed.get(x["key"]) != x["revision"] and
                            int.from_bytes(hashlib.sha256(x["key"].encode()).digest()[:8], "big") % a.shard_count == shard]
@@ -129,7 +131,7 @@ def main() -> int:
                     include.append({"extension": extension, "shard": shard})
         else:
             index = read_json(fs, a.bucket, f"{root_for(a.kind, extension)}/index.json")
-            completed = completed_entries(index)
+            completed = completed_entries(index, a.retry_failures)
             if any(completed.get(x["key"]) != x["revision"] for x in candidates):
                 include.append({"extension": extension})
     a.output.parent.mkdir(parents=True, exist_ok=True)
