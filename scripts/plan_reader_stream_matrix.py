@@ -26,6 +26,7 @@ KINDS = {
     "office": {"extensions": ("doc", "docx", "odt", "rtf"), "sharded": False},
     "spreadsheet": {"extensions": ("xls", "xlsx", "csv", "ods"), "sharded": False},
     "web": {"extensions": ("html", "htm", "mht", "mhtml"), "sharded": False},
+    "static-pdf": {"extensions": ("ppt", "pptx", "pps", "wps", "ps"), "sharded": False},
 }
 
 
@@ -90,6 +91,7 @@ def root_for(kind: str, extension: str) -> str:
         "office": f"documents/office/{extension}",
         "spreadsheet": f"documents/spreadsheet/{extension}",
         "web": f"documents/web/{extension}",
+        "static-pdf": f"documents/pdf/{extension}",
     }[kind]
 
 
