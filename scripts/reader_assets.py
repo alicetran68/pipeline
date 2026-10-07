@@ -275,7 +275,7 @@ def bucket_conversion_contract(repo: str, path: str, extension: str, source_byte
     if extension in {"xls", "xlsx", "csv", "ods"}:
         return (SPREADSHEET_HTML_PROFILE, "html", "document.html")
     contract = source_conversion_contract(repo, path, extension, source_bytes)
-    if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub", "swf"}:
+    if contract and contract[1] in {"docx", "html", "text", "markdown", "image", "pdf", "foliate", "epub", "swf", "audio", "video"}:
         return contract
     return None
 
