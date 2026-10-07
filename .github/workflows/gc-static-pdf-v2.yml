@@ -1,0 +1,41 @@
+name: GC Static PDFs v2
+
+on:
+  schedule:
+    - cron: "13 4 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Delete orphan static PDF objects
+        required: true
+        default: false
+        type: boolean
+      grace_days:
+        description: Orphan grace period in days
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-static-pdf-gc
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  gc:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Report or delete only static PDF objects
+        env:
+          HF_S3_ACCESS_KEY_ID: ${{ secrets.HF_S3_ACCESS_KEY_ID }}
+          HF_S3_SECRET_ACCESS_KEY: ${{ secrets.HF_S3_SECRET_ACCESS_KEY }}
+        run: |
+          [[ "${{ inputs.grace_days || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          args=(--grace-days "${{ inputs.grace_days || '0' }}")
+          if [[ "${{ inputs.apply || 'false' }}" == "true" ]]; then args+=(--apply); fi
+          python scripts/gc_static_pdf_v2.py "${args[@]}"

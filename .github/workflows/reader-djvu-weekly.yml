@@ -1,0 +1,50 @@
+name: Weekly DJVU PDF Derivatives
+
+on:
+  schedule:
+    - cron: "37 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Convert and publish pending DJVU derivatives
+        required: true
+        default: false
+        type: boolean
+      limit:
+        description: Maximum DJVU sources; 0 means all pending
+        required: true
+        default: "0"
+        type: string
+
+concurrency:
+  group: reader-djvu-weekly
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: pip install -r scripts/requirements.txt
+      - name: Install DJVU conversion tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends djvulibre-bin qpdf poppler-utils
+      - name: Fetch source metadata once
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: python scripts/fetch_and_parse.py
+      - name: Convert pending DJVU derivatives
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          [[ "${{ inputs.limit || '0' }}" =~ ^[0-9]+$ ]] || exit 1
+          args=(--limit "${{ inputs.limit || '0' }}")
+          if [[ "${{ inputs.apply || 'false' }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then args+=(--apply); fi
+          python scripts/sync_djvu_pdf_derivatives.py "${args[@]}"
