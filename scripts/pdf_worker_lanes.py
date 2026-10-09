@@ -34,6 +34,10 @@ def load_config(path=DEFAULT_CONFIG):
             raise ValueError("PDF worker lane names and account owners must be unique")
         names.add(name)
         owners.add(owner.lower())
+        repository = lane.get("repository", f"{owner}/pipeline")
+        if (not isinstance(repository, str) or not repository.lower().startswith(owner.lower() + "/")
+                or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", repository)):
+            raise ValueError("worker repository must belong to its configured account")
         if index >= len(native):
             continue
         lower, upper = lane.get("min_bytes"), lane.get("max_bytes")
@@ -56,7 +60,17 @@ def lane_for_owner(config, owner):
 
 
 def config_identity(config):
-    return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    routing = {**config, "native_lanes": [{key: value for key, value in lane.items() if key != "repository"}
+                                          for lane in config["native_lanes"]],
+               "converted_lane": {key: value for key, value in config["converted_lane"].items() if key != "repository"}}
+    return hashlib.sha256(json.dumps(routing, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def repository_for_owner(config, owner):
+    lane_for_owner(config, owner)
+    for lane in [*config["native_lanes"], config["converted_lane"]]:
+        if lane["owner"].lower() == owner.lower():
+            return lane.get("repository", f"{lane['owner']}/pipeline")
 
 
 def routing_bytes(item):

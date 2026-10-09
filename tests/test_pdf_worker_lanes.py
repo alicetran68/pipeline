@@ -198,14 +198,15 @@ class PdfWorkerLaneTests(unittest.TestCase):
                 lanes.validate_queue(self.config, queue, "vomebook", stage.removeprefix("plan-"))
 
     def test_run_validation_rejects_other_workflows_branches_and_unfinished_jobs(self):
-        run = {"repository": {"full_name": "vomebook/pipeline"}, "head_branch": "main",
+        repository = lanes.repository_for_owner(self.config, "vomebook")
+        run = {"repository": {"full_name": repository}, "head_branch": "main",
                "path": ".github/workflows/pdf-account-worker.yml", "event": "workflow_dispatch",
                "status": "completed", "conclusion": "failure"}
-        validate_run(self.config, "vomebook/pipeline", run)
+        validate_run(self.config, repository, run)
         for field, value in [("path", ".github/workflows/other.yml"), ("head_branch", "topic"),
                              ("event", "pull_request"), ("status", "in_progress"), ("conclusion", "cancelled")]:
             with self.assertRaises(ValueError):
-                validate_run(self.config, "vomebook/pipeline", {**run, field: value})
+                validate_run(self.config, repository, {**run, field: value})
         with self.assertRaises(ValueError):
             validate_run(self.config, "unconfigured/pipeline", run)
 

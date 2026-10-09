@@ -15,8 +15,8 @@ except ImportError:
 
 def validate_run(config, repository, run):
     owner, separator, name = repository.partition("/")
-    if not separator or name != "pipeline":
-        raise ValueError("PDF worker must run in its account's pipeline repository")
+    if not separator or repository.lower() != pdf_worker_lanes.repository_for_owner(config, owner).lower():
+        raise ValueError("PDF worker must run in its configured account repository")
     pdf_worker_lanes.lane_for_owner(config, owner)
     if (run.get("repository", {}).get("full_name", "").lower() != repository.lower()
             or run.get("head_branch") != "main"
@@ -36,7 +36,7 @@ def main():
     if os.environ.get("GITHUB_REPOSITORY", "").lower() != config["publisher_repository"].lower():
         parser.error("only the configured central repository may publish worker registries")
     owner, separator, name = args.repository.partition("/")
-    if not separator or name != "pipeline" or args.run_id < 1:
+    if not separator or args.repository.lower() != pdf_worker_lanes.repository_for_owner(config, owner).lower() or args.run_id < 1:
         parser.error("invalid worker repository or run ID")
     lane = pdf_worker_lanes.lane_for_owner(config, owner)
     for attempt in range(31):
