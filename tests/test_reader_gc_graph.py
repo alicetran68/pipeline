@@ -369,6 +369,7 @@ class CanonicalOcrPublicationTests(unittest.TestCase):
         existing = {"version": 1, "files": {"book": result}}
         with patch.object(publication, "read_bucket_json", return_value=existing), \
                 patch.object(publication, "read_bucket_bytes", return_value=publication.encode_sidecar({"v": 1, "f": {}})), \
+                patch.object(publication, "verify_ready_objects"), \
                 patch.object(publication, "publish_indexes") as upload, \
                 patch.object(publication, "publish_catalog", return_value="gen"), \
                 patch.object(api, "repo_info") as repo_info, patch.object(api, "create_commit") as commit:
@@ -379,6 +380,14 @@ class CanonicalOcrPublicationTests(unittest.TestCase):
         self.assertEqual(set(payloads), {reader_bucket.INDEX_FILES["ocr"], reader_bucket.INDEX_FILES["sidecar"]})
         sidecar = json.loads(gzip.decompress(payloads[reader_bucket.INDEX_FILES["sidecar"]]))
         self.assertEqual(sidecar["f"]["book"]["o"], result["ocr_manifest"])
+
+    def test_unreadable_ready_manifest_blocks_registry_publication(self):
+        with patch.object(publication, "read_bucket_bytes", side_effect=FileNotFoundError), \
+                patch.object(publication, "publish_indexes") as write:
+            with self.assertRaises(FileNotFoundError):
+                publication.publish(HfApi(), "unused", [{
+                    "status": "ready", "ocr_manifest": "objects/aa/" + "a" * 64 + "/" + "b" * 16 + "/ocr-manifest.json"}])
+            write.assert_not_called()
 
     def test_corrupt_or_unavailable_bucket_never_falls_back_to_dataset(self):
         api = HfApi()

@@ -56,6 +56,20 @@ class PdfWorkerLaneTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             lanes.select_records(self.config, [source], "native-large", "vomebook")
 
+    def test_repository_override_keeps_routing_fingerprint_and_enforces_account(self):
+        config = copy.deepcopy(self.config)
+        original = lanes.config_identity(config)
+        config["native_lanes"][0]["repository"] = "vomebook/other-worker"
+        self.assertEqual(lanes.config_identity(config), original)
+        self.assertEqual(lanes.repository_for_owner(config, "vomebook"), "vomebook/other-worker")
+        run = {"repository": {"full_name": "vomebook/pipeline"}, "head_branch": "main",
+               "path": ".github/workflows/pdf-account-worker.yml", "event": "workflow_dispatch",
+               "status": "completed", "conclusion": "success"}
+        with self.assertRaises(ValueError):
+            validate_run(config, "vomebook/pipeline", run)
+        run["repository"]["full_name"] = "vomebook/other-worker"
+        validate_run(config, "vomebook/other-worker", run)
+
     def test_generated_stream_keeps_primary_pdf_through_sidecar_rebuild(self):
         from scripts import shared
         from scripts.build_reader_assets_v2_sidecar import add_pdf_streams

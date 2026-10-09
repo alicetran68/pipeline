@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import time
@@ -123,7 +124,38 @@ def published(current: dict, results: list[dict]) -> bool:
     return bool(results)
 
 
+def verify_ready_objects(result: dict) -> None:
+    """A ready registry entry must name readable, complete current-bucket objects."""
+    token = os.environ.get("HF_TOKEN")
+    path = pdf_ocr.validate_ocr_object_path(result["ocr_manifest"], "/ocr-manifest.json")
+    raw = read_bucket_bytes(path, token, bucket=shared.PDF_PAGES_BUCKET)
+    if (len(raw) != result["ocr_manifest_bytes"]
+            or hashlib.sha256(raw).hexdigest() != result["ocr_manifest_sha256"]):
+        raise ValueError("published OCR manifest checksum mismatch")
+    manifest = json.loads(raw)
+    count = result["page_count"]
+    if (manifest.get("kind") != "pdf-ocr" or manifest.get("complete") is not True
+            or manifest.get("page_count") != count
+            or manifest.get("source_sha256") != result["source_sha256"]
+            or [page.get("p") for page in manifest.get("pages", [])] != list(range(1, count + 1))):
+        raise ValueError("published OCR manifest identity mismatch")
+    text_meta = manifest["book_text"]
+    text_path = pdf_ocr.validate_ocr_object_path(text_meta["path"], "/ocr/book-text.json.gz")
+    text_raw = read_bucket_bytes(text_path, token, bucket=shared.PDF_PAGES_BUCKET)
+    if len(text_raw) != text_meta["bytes"] or hashlib.sha256(text_raw).hexdigest() != text_meta["sha256"]:
+        raise ValueError("published book-text checksum mismatch")
+    text = json.loads(gzip.decompress(text_raw))
+    if (text.get("kind") != "pdf-book-text" or text.get("version") != 2
+            or text.get("complete") is not True or text.get("page_count") != count
+            or [page.get("page") for page in text.get("pages", [])] != list(range(1, count + 1))):
+        raise ValueError("published book text is incomplete")
+
+
 def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> None:
+    if type(api) is HfApi:
+        for result in results:
+            if result.get("status") == "ready":
+                verify_ready_objects(result)
     for attempt in range(attempts):
         bucket_publication = type(api) is HfApi
         info = None if bucket_publication else api.repo_info(repo_id=repo, repo_type="dataset")

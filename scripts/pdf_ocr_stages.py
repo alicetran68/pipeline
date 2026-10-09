@@ -109,7 +109,7 @@ def upload_objects(bundle: Path) -> list[str]:
             protection_paths.append(protection_path)
             retry(lambda: api.sync_bucket(
                 str(root), f"{BUCKET}/{relative}",
-                include=["pages/*.webp", "ocr/**", "page-manifest.json", "render-manifest.json",
+                include=["pages/*.webp", "ocr/**", "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
                          "render-range-*.json"], quiet=True))
             retry(lambda: api.sync_bucket(
                 str(root), f"{OCR_INPUT_BUCKET}/{relative}",
@@ -1173,6 +1173,16 @@ def main():
                     result = assemble_book(book, saved, Path(temp))
                     if result["status"] == "ready":
                         result["processing_roots"] = upload_objects(Path(temp))
+                        published_manifest = json.loads(read_object({
+                            "path": result["ocr_manifest"], "sha256": result["ocr_manifest_sha256"],
+                            "bytes": result["ocr_manifest_bytes"]}, "/ocr-manifest.json"))
+                        if (published_manifest.get("complete") is not True
+                                or published_manifest.get("page_count") != book["page_count"]):
+                            raise ValueError("uploaded OCR manifest is incomplete")
+                        published_text = json.loads(gzip.decompress(read_object(published_manifest["book_text"])))
+                        if (published_text.get("complete") is not True
+                                or len(published_text.get("pages", [])) != book["page_count"]):
+                            raise ValueError("uploaded OCR text is incomplete")
                 completed.append(result)
             except Exception as exc:
                 completed.append({**public_item({k: v for k, v in book.items() if k not in {"pages", "saved"}}),

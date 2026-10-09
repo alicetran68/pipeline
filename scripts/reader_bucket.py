@@ -39,6 +39,8 @@ def bucket_uri(path: str, bucket: str = READER_ASSETS_BUCKET) -> str:
 
 def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_BUCKET) -> bytes:
     fs = HfFileSystem(token=token)
+    # Bucket writes use the Hub API, outside this filesystem's metadata cache.
+    fs.invalidate_cache()
     with fs.open(bucket_uri(path, bucket), "rb") as stream:
         return stream.read()
 
