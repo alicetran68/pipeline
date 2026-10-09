@@ -54,7 +54,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
             continue
         path = entry.get("path") or entry.get("page_manifest", {}).get("path")
         if path:
-            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path)}
+            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(path, entry, files.get(key))}
     for key, entry in (ocr_manifest or {}).get("files", {}).items():
         if key in spreadsheet_keys:
             continue
@@ -63,7 +63,7 @@ def build_index(manifest: dict, pdf_manifest: dict | None = None,
         page_path = (entry.get("page_manifest") or {}).get("path")
         if (entry.get("status") in {"rendered", "failed"} and page_path
                 and entry.get("render_manifest")):
-            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(page_path)}
+            files[key] = {**files.get(key, {}), **shared.pdf_pages_sidecar_entry(page_path, entry, files.get(key))}
         if entry.get("status") != "ready" or not isinstance(entry.get("ocr_manifest"), str):
             continue
         merged = shared.merge_pdf_ocr_sidecar_entry(files.get(key), entry)

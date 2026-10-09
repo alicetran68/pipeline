@@ -178,7 +178,7 @@ class PdfOcrContractTests(unittest.TestCase):
         with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[original]), \
                 patch.object(pdf_ocr.pdf_assets, "load_generated_records", return_value=[repaired]):
             records = pdf_ocr.source_records(Path("unused"), Path("unused"), {"revision": "assets"})
-        self.assertEqual(records, [repaired])
+        self.assertEqual(records, [{**repaired, "original_source_bytes": None}])
 
         with patch.object(pdf_ocr.pdf_assets, "load_records", return_value=[original]), \
                 patch.object(pdf_ocr.pdf_assets, "load_generated_records", return_value=[]):

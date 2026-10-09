@@ -18,7 +18,7 @@ try:
         source_conversion_contract, source_url, validate_manifest,
     )
     from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
-    from .gc_reader_bucket import S3BucketStore
+    from .reader_gc_graph import S3BucketStore
 except ImportError:
     from reader_assets import (
         EPUB_CHAPTER_PROFILE, MANIFEST_NAME, READER_ASSETS_BUCKET, READER_ASSETS_REPO,
@@ -28,7 +28,7 @@ except ImportError:
         source_conversion_contract, source_url, validate_manifest,
     )
     from reader_bucket import INDEX_FILES, read_json as read_bucket_json
-    from gc_reader_bucket import S3BucketStore
+    from reader_gc_graph import S3BucketStore
 
 try:
     from . import shared

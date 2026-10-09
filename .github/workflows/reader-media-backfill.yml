@@ -11,7 +11,7 @@ on:
         options: [all, audio, video, swf]
 
 concurrency:
-  group: reader-media-backfill
+  group: reader-sidecar
   cancel-in-progress: false
   queue: max
 

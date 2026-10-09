@@ -92,23 +92,53 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]],
             time.sleep(delay)
 
 
-def pdf_pages_sidecar_entry(path: str) -> dict:
+def pdf_pages_sidecar_entry(path: str, result: dict | None = None, current: dict | None = None) -> dict:
     """Compact search-sidecar entry for a published PDF page stream."""
-    return {"s": 2, "m": "p", "p": path, "b": PDF_PAGES_BUCKET}
+    entry = {"s": 2, "m": "p", "p": path, "b": PDF_PAGES_BUCKET}
+    document = (result or {}).get("reader_assets_path", "")
+    bucket = (result or {}).get("reader_assets_bucket", "")
+    if not document and current:
+        if str(current.get("p", "")).endswith("/document.pdf"):
+            document, bucket = current["p"], current.get("b", "")
+        else:
+            document, bucket = current.get("pd", ""), current.get("pdb", "")
+    if document.endswith("/document.pdf") and bucket in {PDF_PAGES_BUCKET, READER_ASSETS_BUCKET}:
+        entry.update(pd=document, pdb=bucket)
+    return entry
+
+
+def preserve_pdf_sidecar_entry(current: dict | None, result: dict) -> dict:
+    entry = dict(current or {})
+    if (result.get("status") != "ready"
+            or result.get("reader_presentation", {}).get("strategy") != "preserve-pdf"
+            or not str(entry.get("p", "")).endswith("/page-manifest.json")):
+        return entry
+    if result.get("source_kind") == "generated" and result.get("reader_assets_path"):
+        entry.update({"s": 2, "m": "p", "p": result["reader_assets_path"],
+                      "b": result.get("reader_assets_bucket") or PDF_PAGES_BUCKET})
+        if entry.get("o"):
+            entry["ob"] = PDF_PAGES_BUCKET
+        return entry
+    if entry.get("o"):
+        return {"s": 3, "m": "p", "o": entry["o"], "b": PDF_PAGES_BUCKET,
+                **({"om": entry["om"]} if entry.get("om") else {})}
+    return {"s": 4}
 
 
 def merge_pdf_ocr_sidecar_entry(current: dict | None, result: dict) -> dict | None:
     """Merge OCR metadata without losing an existing Reader asset mapping."""
-    entry = dict(current or {})
+    entry = preserve_pdf_sidecar_entry(current, result)
     if result.get("status") == "failed":
         return entry or {"s": 4, "om": "failed", "oe": result.get("error", "OCR failed")}
     if result.get("status") == "ready":
         page_manifest = result.get("page_manifest")
+        if result.get("reader_presentation", {}).get("strategy") == "preserve-pdf" and page_manifest:
+            raise ValueError("preserved PDF must not advertise a reader page stream")
         # A completed page stream must take precedence over an older optimized
         # PDF route.  OCR recognition can publish after rendering, so keeping
         # the PDF in `p` would make Reader ignore the already available pages.
         if (isinstance(page_manifest, dict) and isinstance(page_manifest.get("path"), str)):
-            entry.update(pdf_pages_sidecar_entry(page_manifest["path"]))
+            entry.update(pdf_pages_sidecar_entry(page_manifest["path"], result, entry))
         entry.update({
             "o": result["ocr_manifest"],
             "om": result.get("classification", ""),

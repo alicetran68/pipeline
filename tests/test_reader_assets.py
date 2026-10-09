@@ -17,169 +17,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
-from huggingface_hub import CommitOperationAdd, CommitOperationDelete
+from huggingface_hub import CommitOperationAdd
 from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 
 from scripts import build_reader_assets_index, convert_reader_assets, pdf_assets, publish_reader_assets
-from scripts import gc_reader_bucket, prune_reader_assets, publish_search_reader_index
+from scripts import publish_search_reader_index
 from scripts import epub_chapters, reader_assets, render_spreadsheet_html, scan_reader_assets
 
 
 class ReaderAssetContractTests(unittest.TestCase):
-    def test_bucket_head_inventory_treats_only_not_found_as_missing(self):
-        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
-        store._location = Mock(return_value=("vomebook", "pdf-pages"))
-        client = Mock()
-
-        class MissingObject(Exception):
-            response = {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}
-
-        def head_object(*, Key, **_kwargs):
-            if Key == "objects/missing":
-                raise MissingObject()
-
-        client.head_object.side_effect = head_object
-        store._client = Mock(return_value=client)
-        store._list_workers = 2
-        store._verify_workers = 2
-        self.assertEqual(store.existing_files(
-            reader_assets.READER_ASSETS_BUCKET, {"objects/present", "objects/missing"},
-        ), {"objects/present"})
-
-    def test_bucket_integrity_scan_expands_page_and_chapter_manifests(self):
-        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
-        store._manifest_workers = 2
-        manifests = {
-            "objects/a/page-manifest.json": {"page_count": 2},
-            "ebook-chapters/objects/b/chapter-manifest.json": {
-                "chapters": [{"path": "chapters/chapter-0001.xhtml"}],
-                "search_index": {"path": "epub-search-index.json.gz"},
-            },
-        }
-        store.read_bytes = Mock(side_effect=lambda _bucket, path: json.dumps(manifests[path]).encode())
-        self.assertEqual(store.manifest_references(reader_assets.READER_ASSETS_BUCKET, set(manifests)), {
-            "objects/a/page-manifest.json": {
-                "objects/a/pages/page-000001.webp", "objects/a/pages/page-000002.webp",
-            },
-            "ebook-chapters/objects/b/chapter-manifest.json": {
-                "ebook-chapters/objects/b/chapters/chapter-0001.xhtml",
-                "ebook-chapters/objects/b/epub-search-index.json.gz",
-            },
-        })
-
-    def test_bucket_gc_zero_limit_means_unlimited(self):
-        self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 0), ["a", "b", "c"])
-        self.assertEqual(gc_reader_bucket.apply_limit(["b", "a", "c"], 2), ["a", "b"])
-
-    def test_bucket_gc_can_use_existing_compact_sidecar_without_new_indexes(self):
-        sidecar = gzip.compress(json.dumps({"v": 1, "f": {
-            "live": {"s": 2, "p": "objects/live", "b": "vomebook/pdf-pages"},
-        }}).encode())
-        store = Mock()
-        store.read_bytes.return_value = sidecar
-        files = {"reader-index/reader_assets.json.gz", "objects/live", "objects/old"}
-        payloads = gc_reader_bucket.read_index_payloads(store, files)
-        references = gc_reader_bucket.current_references(files, {}, payloads)
-        self.assertIn("objects/live", references)
-        self.assertNotIn("objects/old", references)
-
-    def test_bucket_gc_expands_page_manifest_to_derived_pages(self):
-        store = Mock()
-        store.read_bytes.side_effect = lambda _bucket, path: json.dumps({
-            "kind": "pdf-pages", "page_count": 2,
-        }).encode() if path.endswith("page-manifest.json") else b"{}"
-        manifest = "objects/aa/book/pageset/page-manifest.json"
-        files = {
-            manifest,
-            "objects/aa/book/pageset/pages/page-000001.webp",
-            "objects/aa/book/pageset/pages/page-000002.webp",
-            "objects/aa/book/pageset/pages/page-000003.webp",
-        }
-        references = {manifest}
-        gc_reader_bucket.expand_reference_closure(store, files, references)
-        self.assertIn("objects/aa/book/pageset/pages/page-000001.webp", references)
-        self.assertIn("objects/aa/book/pageset/pages/page-000002.webp", references)
-        self.assertNotIn("objects/aa/book/pageset/pages/page-000003.webp", references)
-
-    def test_bucket_gc_expands_chapter_manifest_relative_paths(self):
-        store = Mock()
-        store.read_bytes.return_value = json.dumps({
-            "kind": "ebook-chapters", "chapters": [{"path": "chapters/chapter-0001.xhtml"}],
-            "search_index": {"path": "epub-search-index.json.gz"},
-        }).encode()
-        manifest = "ebook-chapters/objects/ab/book/epub-chapters/chapter-manifest.json"
-        files = {
-            manifest,
-            "ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml",
-            "ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz",
-            "ebook-chapters/objects/ab/book/epub-chapters/resources/chapter-0001/cover.jpg",
-        }
-        references = {manifest}
-        gc_reader_bucket.expand_reference_closure(store, files, references)
-        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/chapters/chapter-0001.xhtml", references)
-        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/epub-search-index.json.gz", references)
-        self.assertIn("ebook-chapters/objects/ab/book/epub-chapters/resources/chapter-0001/cover.jpg", references)
-
-    def test_bucket_gc_jxl_only_filters_candidates_without_touching_other_assets(self):
-        store = Mock()
-        store.list_files.side_effect = [
-            {"reader-index/reader_assets.json.gz", "objects/a/page.webp", "objects/b/old.jxl"},
-            set(),
-        ]
-        sidecar = gzip.compress(json.dumps({"v": 1, "f": {}}).encode())
-        store.read_bytes.return_value = sidecar
-        updated, expired, counts = gc_reader_bucket.plan_gc(store, 0, 0, jxl_only=True)
-        self.assertEqual(counts[reader_assets.READER_ASSETS_BUCKET], 1)
-        self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/old.jxl"])
-        self.assertEqual(counts["__jxl_total"], 1)
-        self.assertEqual(counts["__jxl_referenced"], 0)
-
-    def test_bucket_gc_force_jxl_delete_selects_only_reader_jxl(self):
-        store = Mock()
-        store.list_files.side_effect = [
-            {"reader-index/reader_assets.json.gz", "objects/a/live.webp", "objects/b/live.jxl"},
-            {"objects/c/staging.jxl"},
-        ]
-        store.read_bytes.return_value = gzip.compress(json.dumps({"v": 1, "f": {}}).encode())
-        _updated, expired, _counts = gc_reader_bucket.plan_gc(
-            store, 0, 0, force_jxl_delete=True
-        )
-        self.assertEqual(expired[reader_assets.READER_ASSETS_BUCKET], ["objects/b/live.jxl"])
-
-    def test_bucket_gc_can_use_separate_input_account_credentials(self):
-        class FakeBoto3:
-            def __init__(self):
-                self.calls = []
-
-            def client(self, *args, **kwargs):
-                self.calls.append((args, kwargs))
-                return object()
-
-        store = gc_reader_bucket.S3BucketStore.__new__(gc_reader_bucket.S3BucketStore)
-        store._boto3 = FakeBoto3()
-        store._config = object()
-        store._access_key = "main-key"
-        store._secret_key = "main-secret"
-        store._namespace = "vomebook"
-        store._input_namespace = "other-account"
-        store._input_bucket = "melsm"
-        store._clients = {}
-        with patch.dict("os.environ", {
-            "HF_S3_INPUT_ACCESS_KEY_ID": "",
-            "HF_S3_INPUT_SECRET_ACCESS_KEY": "",
-        }):
-            with self.assertRaises(RuntimeError):
-                store._client("other-account")
-
-        with patch.dict("os.environ", {
-            "HF_S3_INPUT_ACCESS_KEY_ID": "input-key",
-            "HF_S3_INPUT_SECRET_ACCESS_KEY": "input-secret",
-        }):
-            store._clients = {}
-            store._client("other-account")
-        kwargs = store._boto3.calls[-1][1]
-        self.assertEqual(kwargs["aws_access_key_id"], "input-key")
-
     def test_conversion_set_excludes_unsafe_or_native_media(self):
         self.assertEqual(
             set(reader_assets.CONVERTIBLE_EXTENSIONS),
@@ -3252,7 +3098,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(files["book"]["m"], "e")
         self.assertEqual(files["scan"], {
             "s": 2, "m": "p", "p": "objects/bb/" + "b" * 64 + "/page-manifest.json",
-            "b": "vomebook/pdf-pages",
+             "b": "vomebook/pdf-pages-v2",
         })
         self.assertNotIn("text", files)
 
@@ -3269,7 +3115,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(build_reader_assets_index.build_index(manifest, ocr_manifest=ocr)["f"]["scan"], {
             "s": 2, "m": "p", "p": "objects/aa/source/document.pdf",
             "o": ocr["files"]["scan"]["ocr_manifest"], "om": "scan",
-            "ob": "vomebook/pdf-pages",
+             "ob": "vomebook/pdf-pages-v2",
         })
 
     def test_sidecar_excludes_legacy_streams_and_linearized_pdfs(self):
@@ -3289,10 +3135,10 @@ class PublicationTests(unittest.TestCase):
         self.assertIn("current", files)
         self.assertNotIn("linear", files)
 
-    def test_reader_workflow_uses_explicit_empty_queue_guard_under_errexit(self):
-        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
-        self.assertIn('if [[ "${count}" == "0" ]]; then\n            exit 0\n          fi', workflow)
-        self.assertNotIn('[[ "${count}" == "0" ]] && exit 0', workflow)
+    def test_media_workflow_has_explicit_empty_matrix_guard(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/reader-media-backfill.yml").read_text(encoding="utf-8")
+        self.assertIn("if: fromJSON(needs.plan.outputs.matrix).include[0] != null", workflow)
+        self.assertIn("python scripts/finalize_media_indexes.py", workflow)
 
 
 class SearchIndexPublicationTests(unittest.TestCase):
@@ -3327,55 +3173,9 @@ class SearchIndexPublicationTests(unittest.TestCase):
         )
 
 
-class PruneTests(unittest.TestCase):
-    def test_only_unreferenced_orphans_past_grace_period_expire(self):
-        manifest = {"version": 1, "files": {
-            "live": {"status": "ready", "path": "objects/live"},
-        }, "orphans": {
-            "objects/old": {"since": "2026-06-01"},
-            "objects/new": {"since": "2026-08-20"},
-            "objects/live": {"since": "2026-01-01"},
-            "objects/invalid": {"since": "unknown"},
-        }}
-        self.assertEqual(
-            prune_reader_assets.expired_orphans(manifest, date(2026, 8, 26), 30, 100),
-            ["objects/old"],
-        )
-
-    def test_zero_day_grace_deletes_today_orphans_but_not_referenced_objects(self):
-        manifest = {"version": 1, "files": {
-            "live": {"status": "ready", "path": "objects/live"},
-        }, "orphans": {
-            "objects/today": {"since": "2026-08-26"},
-            "objects/live": {"since": "2026-01-01"},
-            "objects/invalid": {"since": "unknown"},
-        }}
-        self.assertEqual(
-            prune_reader_assets.expired_orphans(manifest, date(2026, 8, 26), 0, 100),
-            ["objects/today"],
-        )
-
-    def test_prune_cli_accepts_zero_day_grace(self):
-        with patch.object(sys, "argv", ["prune_reader_assets.py", "--grace-days", "0"]):
-            args = prune_reader_assets.parse_args()
-        self.assertEqual(args.grace_days, 0)
-
-    def test_prune_deletes_objects_and_republishes_manifest_and_sidecar(self):
-        manifest = {"version": 1, "files": {}, "orphans": {
-            "objects/old": {"since": "2026-01-01"},
-            "objects/keep": {"since": "2026-08-20"},
-        }}
-        updated, operations = prune_reader_assets.build_prune(manifest, ["objects/old"])
-        self.assertNotIn("objects/old", updated["orphans"])
-        self.assertIn("objects/keep", updated["orphans"])
-        self.assertEqual(
-            {operation.path_in_repo for operation in operations},
-            {"objects/old", "manifest.json", "reader_assets.json.gz"},
-        )
-        self.assertEqual(sum(isinstance(operation, CommitOperationDelete) for operation in operations), 1)
-
 
 class WorkflowContractTests(unittest.TestCase):
+    @unittest.skip("general reader-assets workflow was replaced by v2-specific workflows")
     def test_workflow_exposes_incremental_controls_and_excludes_pdg(self):
         workflow = Path(".github/workflows/reader-assets.yml").read_text(encoding="utf-8")
         self.assertIn('cron: "23 3 * * 0"', workflow)

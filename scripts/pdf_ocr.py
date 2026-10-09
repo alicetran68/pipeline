@@ -350,6 +350,36 @@ def probe_pdf(path: Path) -> dict:
     }
 
 
+def reader_presentation(path: Path) -> dict:
+    """Inspect encoded images without rendering or recompressing the document."""
+    import pymupdf
+    inspected = 0
+    binary_images = 0
+    filters = set()
+    try:
+        with pymupdf.open(path) as document:
+            for page in document:
+                # Image-info includes inline images that get_images can omit.
+                binary_images += sum(image.get("bpc") == 1 for image in page.get_image_info())
+                filters.update(str(image[8]) for image in page.get_images(full=True)
+                               if len(image) > 8 and image[8])
+                inspected += 1
+        if not inspected:
+            raise ValueError("empty PDF")
+        return {"strategy": "preserve-pdf" if binary_images else "page-stream",
+                "reason": "bitonal-raster" if binary_images else "no-bitonal-raster",
+                "complete": True, "inspected_pages": inspected,
+                "bitonal_images": binary_images, "filters": sorted(filters)}
+    except Exception as error:
+        return {"strategy": "preserve-pdf", "reason": "inspection-failed",
+                "complete": False, "inspected_pages": inspected,
+                "error_type": type(error).__name__}
+
+
+def preserves_reader_pdf(item: dict) -> bool:
+    return item.get("reader_presentation", {}).get("strategy") == "preserve-pdf"
+
+
 def normalize_blocks(blocks, width: float, height: float) -> list[dict]:
     width = max(1.0, float(width or 1))
     height = max(1.0, float(height or 1))
@@ -570,7 +600,8 @@ def reader_webp_quality(image, full_page_scan: bool) -> int:
 
 
 def render_page(path: Path, page: int, directory: Path,
-                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False) -> tuple[Path, int, int]:
+                reader_pixels: tuple[int, int] | None = None, reader_jxl: bool = False,
+                reader_images: bool = True) -> tuple[Path, int, int]:
     prefix = directory / f"page-{page:06d}"
     _run([
         "pdftocairo", "-png", "-singlefile", "-r", str(_page_render_dpi(path, page)),
@@ -588,6 +619,9 @@ def render_page(path: Path, page: int, directory: Path,
             rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
             width, height = rgb.size
             rgb.save(png, "PNG")
+        if not reader_images:
+            rgb.close()
+            return png, width, height
         if reader_pixels is None and not reader_jxl:
             # Preserve the older single-stage profile's delivery bytes.
             if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
@@ -667,14 +701,14 @@ def write_json(path: Path, payload: dict) -> tuple[str, int]:
 
 def read_bucket_json(path: str) -> dict:
     from huggingface_hub import HfFileSystem
-    uri = f"hf://buckets/vomebook/pdf-pages/{path}"
+    uri = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{path}"
     with HfFileSystem(token=os.environ.get("HF_TOKEN")).open(uri, "rb") as stream:
         return json.loads(stream.read())
 
 
 def read_bucket_gzip_json(path: str) -> dict:
     from huggingface_hub import HfFileSystem
-    uri = f"hf://buckets/vomebook/pdf-pages/{path}"
+    uri = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{path}"
     with HfFileSystem(token=os.environ.get("HF_TOKEN")).open(uri, "rb") as stream:
         return json.loads(gzip.decompress(stream.read()))
 
@@ -696,6 +730,9 @@ def build_item(item: dict, source: Path, bundle: Path) -> dict:
             "status": "skipped", "reason": "native-text-pdf", "profile": asset_profile(),
             "classification": probe["classification"], "page_count": pages, "stream": False,
         }
+    presentation = item.get("reader_presentation") or reader_presentation(source)
+    if presentation["strategy"] == "preserve-pdf":
+        raise ValueError("preserved PDFs require the independent plan-render/plan-ocr pipeline; reader re-encoding is disabled")
     previous = item.get("_previous_ocr") if isinstance(item.get("_previous_ocr"), dict) else None
     previous_manifest = None
     previous_book = None
@@ -920,6 +957,7 @@ def validate_manifest(manifest: dict) -> dict:
 def source_records(search_data: Path, revisions: Path, assets_manifest: dict | None = None,
                    repo: str = "") -> list[dict]:
     records = pdf_assets.load_records(search_data, revisions, repo, "pdf")
+    original_sizes = {item["key"]: item.get("source_bytes") for item in records}
     if assets_manifest:
         generated = pdf_assets.load_generated_records(
             assets_manifest, repo=repo, assets_revision=str(assets_manifest.get("revision", "main")),
@@ -939,6 +977,8 @@ def source_records(search_data: Path, revisions: Path, assets_manifest: dict | N
     for item in records:
         key = item["key"]
         if key not in by_key or item.get("source_kind") == "generated":
+            if item.get("source_kind") == "generated" and key in original_sizes:
+                item = {**item, "original_source_bytes": original_sizes[key]}
             by_key[key] = item
     records = list(by_key.values())
     records.sort(key=lambda item: (item.get("repo", ""), item.get("path", ""), item.get("source_kind", "")))

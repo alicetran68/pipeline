@@ -16,10 +16,11 @@ from huggingface_hub import hf_hub_download, sync_bucket
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_ocr
+    from . import pdf_ocr, shared
     from .reader_bucket import materialize as materialize_bucket
 except ImportError:
     import pdf_ocr
+    import shared
     from reader_bucket import materialize as materialize_bucket
 
 
@@ -62,7 +63,7 @@ def upload_ocr_objects(bundle: Path) -> None:
     """Scope remote listings to each local book/profile, not the whole Bucket."""
     for root in sorted((bundle / "objects").glob("*/*/*")):
         if root.is_dir():
-            destination = f"hf://buckets/vomebook/pdf-pages/{root.relative_to(bundle).as_posix()}"
+            destination = f"hf://buckets/{shared.PDF_PAGES_BUCKET}/{root.relative_to(bundle).as_posix()}"
             _sync_bucket_with_retry(str(root), destination, os.environ.get("HF_TOKEN"))
 
 
@@ -71,7 +72,8 @@ def source_path(item: dict) -> Path:
         try:
             if item.get("source_kind") == "generated":
                 if item.get("reader_assets_bucket") and item.get("reader_assets_path"):
-                    return materialize_bucket(item["reader_assets_path"], os.environ.get("HF_TOKEN"), ".pdf")
+                    return materialize_bucket(item["reader_assets_path"], os.environ.get("HF_TOKEN"), ".pdf",
+                                              bucket=item["reader_assets_bucket"])
                 return Path(hf_hub_download(
                     item["reader_assets_repo"], item["reader_assets_path"], repo_type="dataset",
                     revision=item["reader_assets_revision"], token=os.environ.get("HF_TOKEN")))

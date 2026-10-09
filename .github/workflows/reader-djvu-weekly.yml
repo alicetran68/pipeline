@@ -17,7 +17,7 @@ on:
         type: string
 
 concurrency:
-  group: reader-djvu-weekly
+  group: reader-sidecar
   cancel-in-progress: false
   queue: max
 

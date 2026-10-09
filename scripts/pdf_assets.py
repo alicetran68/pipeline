@@ -18,10 +18,10 @@ from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from .reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
-    from .reader_bucket import INDEX_FILES, read_json as read_bucket_json
+    from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes, read_json as read_bucket_json
 except ImportError:
     from reader_assets import READER_ASSETS_REPO, decode_search_payload, relative_path, source_url
-    from reader_bucket import INDEX_FILES, read_json as read_bucket_json
+    from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes, read_json as read_bucket_json
 
 try:
     from . import shared
@@ -420,47 +420,29 @@ def build_publish(manifest: dict, results: list[dict], bundle: Path) -> tuple[di
 def remote_manifest(api: HfApi, repo: str) -> dict:
     if type(api) is HfApi:
         try:
-            return read_bucket_json(INDEX_FILES["pdf"], os.environ.get("HF_TOKEN"))
+            return read_bucket_json(INDEX_FILES["pdf"], os.environ.get("HF_TOKEN"), shared.PDF_PAGES_BUCKET)
         except (FileNotFoundError, OSError, ValueError):
             pass
-    try:
-        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=MANIFEST_NAME)
-    except HfHubHTTPError as exc:
-        if getattr(exc.response, "status_code", None) != 404:
-            raise
-        return empty_manifest()
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return empty_manifest()
 
 
 def failed_source_keys(api: HfApi, repo: str, extension: str) -> set[str]:
     if type(api) is HfApi:
         try:
-            manifest = read_bucket_json(INDEX_FILES["manifest"], os.environ.get("HF_TOKEN"))
+            manifest = read_bucket_json(INDEX_FILES["pdf"], os.environ.get("HF_TOKEN"), shared.PDF_PAGES_BUCKET)
             return {key for key, entry in manifest.get("files", {}).items()
                     if entry.get("status") == "failed" and entry.get("source_extension") == extension}
         except (FileNotFoundError, OSError, ValueError):
             pass
-    try:
-        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="manifest.json")
-    except HfHubHTTPError as exc:
-        if getattr(exc.response, "status_code", None) == 404:
-            return set()
-        raise
-    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
-    return {
-        key for key, entry in manifest.get("files", {}).items()
-        if entry.get("status") == "failed" and entry.get("source_extension") == extension
-    }
+    return set()
 
 
 def remote_sidecar(api: HfApi, repo: str) -> dict:
     try:
-        path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename="reader_assets.json.gz")
-    except HfHubHTTPError as exc:
-        if getattr(exc.response, "status_code", None) != 404:
-            raise
+        raw = read_bucket_bytes(INDEX_FILES["sidecar"], os.environ.get("HF_TOKEN"), shared.READER_ASSETS_BUCKET)
+    except (FileNotFoundError, OSError, ValueError):
         return {"v": 1, "f": {}}
-    return json.loads(gzip.decompress(Path(path).read_bytes()).decode("utf-8"))
+    return json.loads(gzip.decompress(raw).decode("utf-8"))
 
 
 def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
@@ -472,7 +454,7 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> bytes:
         path = result.get("path") or result.get("page_manifest", {}).get("path")
         if not path:
             continue
-        updated["f"][result["key"]] = shared.pdf_pages_sidecar_entry(path)
+        updated["f"][result["key"]] = shared.pdf_pages_sidecar_entry(path, result, updated["f"].get(result["key"]))
     payload = json.dumps(updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return gzip.compress(payload, compresslevel=9, mtime=0)
 
@@ -543,8 +525,8 @@ def publish(api: HfApi, repo: str, manifest: dict, results: list[dict], bundle: 
                         encoding="utf-8",
                     )
                     (index_root / "reader_assets.json.gz").write_bytes(index_sidecar)
-                    sync_bucket(root, "hf://buckets/vomebook/pdf-pages",
-                                 include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
+                    sync_bucket(root, f"hf://buckets/{shared.PDF_PAGES_BUCKET}",
+                                include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
             return
         except HfHubHTTPError as exc:
             if not shared.is_retryable_hf_status(shared.hf_status_code(exc)):
@@ -568,7 +550,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
-    parser.add_argument("--queue-file", type=Path, help="Weighted queue produced by plan_pdf_assets.py")
+    parser.add_argument("--queue-file", type=Path, help="Legacy queue input; account workers use pdf_ocr_stages.py")
     parser.add_argument("--source-dir", type=Path, help="Local source mirror, keyed by dataset/path")
     parser.add_argument("--bundle", type=Path, default=Path("output/pdf-assets/bundle"))
     parser.add_argument("--build-only", action="store_true")

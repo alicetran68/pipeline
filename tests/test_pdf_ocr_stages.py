@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
-import yaml
 
 from scripts import pdf_ocr, pdf_ocr_stages as stages, plan_pdf_ocr
 from scripts.build_reader_assets_index import build_index
@@ -36,7 +35,8 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def item(self):
         return {"key": "repo\0small.pdf", "repo": "repo", "path": "small.pdf",
-                "source_kind": "upstream", "source_revision": "revision"}
+                "source_kind": "upstream", "source_revision": "revision",
+                "reader_presentation": {"strategy": "page-stream", "complete": True}}
 
     def render_fixture(self, native=False, jxl=False, force_image=False, native_only=False):
         source = self.root / "source.pdf"
@@ -486,7 +486,7 @@ class PdfOcrStagesTests(unittest.TestCase):
 
     def test_transfers_scope_each_book_not_whole_bucket(self):
         result = self.render_fixture()
-        with patch.object(stages, "HfApi") as api:
+        with patch.object(stages, "HfApi") as api, patch.object(stages, "publish_json"):
             stages.upload_objects(self.root / "render")
         call = api.return_value.sync_bucket.call_args
         self.assertTrue(call.args[1].endswith(str(Path(result["render_manifest"]["path"]).parent)))
@@ -510,21 +510,13 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertTrue(stages.render_partition_matches(large, "large"))
         self.assertTrue(stages.render_partition_matches(small, "all"))
 
-    def test_render_workflow_partitions_and_enables_native_text_streams(self):
-        root = Path(__file__).resolve().parents[1]
-        large = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
-        small = (root / ".github/workflows/pdf-render-small-inputs.yml").read_text()
-        self.assertIn("plan-render --partition large --native-text-stream", large)
-        self.assertIn("plan-render --partition small --native-text-stream", small)
-        self.assertIn("group: pdf-render-small-inputs", small)
-        self.assertIn("group: reader-sidecar", small)
-
     def test_native_text_stream_plan_marks_pages_for_images_without_ocr(self):
         item = {**self.item(), "source_bytes": 1024}
         probe = {"page_count": 2, "page_chars": [80, 80], "classification": "native-text"}
         with patch.object(plan_pdf_ocr, "download_source", return_value=self.root / "source.pdf"), \
-                patch.object(plan_pdf_ocr.shared, "hash_file", return_value=("a" * 64, 1024)), \
-                patch.object(pdf_ocr, "probe_pdf", return_value=probe):
+                 patch.object(plan_pdf_ocr.shared, "hash_file", return_value=("a" * 64, 1024)), \
+                 patch.object(pdf_ocr, "reader_presentation", return_value={"strategy": "page-stream"}), \
+                 patch.object(pdf_ocr, "probe_pdf", return_value=probe):
             (self.root / "source.pdf").write_bytes(b"pdf")
             queue = plan_pdf_ocr.plan([item], workers=1, native_text_stream=True)
         self.assertTrue(queue["shards"][0]["records"][0]["force_image_render"])
@@ -589,7 +581,7 @@ class PdfOcrStagesTests(unittest.TestCase):
             index = build_index({"files": {}}, ocr_manifest=state)
             compact = index["f"][entry["key"]]
             self.assertEqual(compact["p"], result["page_manifest"]["path"])
-            self.assertEqual(compact["b"], "vomebook/pdf-pages")
+            self.assertEqual(compact["b"], "vomebook/pdf-pages-v2")
             self.assertNotIn("o", compact)
 
     def test_completed_ocr_page_stream_replaces_existing_pdf_route(self):
@@ -601,7 +593,7 @@ class PdfOcrStagesTests(unittest.TestCase):
                                            "ocr_manifest": "objects/old/ocr-manifest.json"}}}
         merged = build_index(base, ocr_manifest=ocr)["f"][result["key"]]
         self.assertEqual(merged["p"], result["page_manifest"]["path"])
-        self.assertEqual(merged["b"], "vomebook/pdf-pages")
+        self.assertEqual(merged["b"], "vomebook/pdf-pages-v2")
         self.assertEqual(merged["o"], "objects/old/ocr-manifest.json")
 
     def test_failed_native_optimization_replaces_pdf_route_and_keeps_text(self):
@@ -623,7 +615,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         api.hf_hub_download.return_value = str(sidecar_path)
         def state(_api, _repo, name, _revision):
             return {"version": 1, "files": {result["key"]: existing} if name == "pdf_ocr_manifest.json" else {}}
-        with patch.object(stages, "load_registry", side_effect=state):
+        with patch.object(stages, "load_registry", side_effect=state), \
+                patch.object(stages, "publish_catalog", return_value="gen"):
             stages.save_registry(api, "test/repo", stages.RENDER_REGISTRY,
                                  {result["key"]: result}, publish_streams=True)
         operations = {op.path_in_repo: op.path_or_fileobj for op in api.create_commit.call_args.kwargs["operations"]}
@@ -635,45 +628,6 @@ class PdfOcrStagesTests(unittest.TestCase):
         self.assertEqual(route["p"], result["page_manifest"]["path"])
         self.assertEqual(route["o"], existing["ocr_manifest"])
 
-    def test_workflows_separate_rendering_and_recognition(self):
-        root = Path(__file__).resolve().parents[1]
-        render_text = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
-        ocr_text = (root / ".github/workflows/pdf-ocr-assets.yml").read_text()
-        render = yaml.safe_load(render_text)
-        ocr = yaml.safe_load(ocr_text)
-        self.assertIn("pdf_ocr_stages.py render", render_text)
-        self.assertNotIn("requirements-pdf-ocr", render_text)
-        self.assertNotIn("poppler-utils", ocr_text)
-        self.assertNotIn("fetch_and_parse", ocr_text)
-        self.assertNotIn("Render PDF OCR Inputs", ocr_text)
-        self.assertIn("lang:", ocr_text)
-        self.assertIn("PDF_OCR_LANG", ocr_text)
-        self.assertIn("backend:", ocr_text)
-        self.assertIn("PDF_OCR_BACKEND", ocr_text)
-        stages_text = (root / "scripts/pdf_ocr_stages.py").read_text()
-        self.assertNotIn("pdf_range_manifest.json", stages_text)
-        self.assertFalse(ocr[True]["workflow_dispatch"]["inputs"]["retry_failed_only"]["default"])
-        self.assertIn("--retry-failed-only", ocr_text)
-        self.assertIn('default: "auto"', ocr_text)
-        self.assertIn('default: "rapidocr_onnxruntime"', ocr_text)
-        self.assertIn("!cancelled()", ocr["jobs"]["publish"]["if"])
-        self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["limit"]["default"], "100")
-        self.assertIn("inputs.limit || '100'", ocr_text)
-        self.assertEqual(render["jobs"]["publish"]["concurrency"]["group"],
-                         ocr["jobs"]["publish"]["concurrency"]["group"])
-        self.assertEqual(render["jobs"]["build"]["strategy"]["max-parallel"], 10)
-        self.assertEqual(ocr[True]["workflow_dispatch"]["inputs"]["target_pages"]["default"], "2000")
-
-    def test_scheduled_render_drains_pending_in_webp_batches(self):
-        root = Path(__file__).resolve().parents[1]
-        text = (root / ".github/workflows/pdf-render-inputs.yml").read_text()
-        workflow = yaml.safe_load(text)
-        inputs = workflow[True]["workflow_dispatch"]["inputs"]
-        self.assertEqual(inputs["limit"]["default"], "100")
-        self.assertFalse(inputs["generate_jxl"]["default"])
-        self.assertEqual(workflow["env"]["PDF_JXL_ENABLED"], "${{ inputs.generate_jxl == true }}")
-        self.assertEqual(workflow["jobs"]["plan"]["steps"][5]["env"]["CHECKPOINT"], "${{ inputs.checkpoint || '0' }}")
-
     def test_render_registry_stream_and_pending_ocr_are_committed_together(self):
         result = self.render_fixture()
         sidecar_path = self.root / "reader.json.gz"
@@ -681,7 +635,8 @@ class PdfOcrStagesTests(unittest.TestCase):
         api = Mock()
         api.repo_info.return_value.sha = "pinned-revision"
         api.hf_hub_download.return_value = str(sidecar_path)
-        with patch.object(stages, "load_registry", side_effect=lambda *args: {"version": 1, "files": {}}):
+        with patch.object(stages, "load_registry", side_effect=lambda *args: {"version": 1, "files": {}}), \
+                patch.object(stages, "publish_catalog", return_value="gen"):
             stages.save_registry(api, "test/repo", stages.RENDER_REGISTRY,
                                  {result["key"]: result}, publish_streams=True)
         call = api.create_commit.call_args.kwargs

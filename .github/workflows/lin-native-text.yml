@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     concurrency:
-      group: reader-pdf-native-text
+      group: reader-sidecar
       cancel-in-progress: false
       queue: max
     steps:

@@ -105,7 +105,7 @@ def main() -> None:
         bundle = Path(temp)
         result = build(entry, manifest, source, bundle)
         if not args.dry_run:
-            stages.upload_objects(bundle)
+            result["processing_roots"] = stages.upload_objects(bundle)
             publication.publish(api, args.assets_repo, [result])
         print(json.dumps({"path": args.path, "pages": result["page_count"],
                           "status": "validated" if args.dry_run else "published"}, ensure_ascii=False))

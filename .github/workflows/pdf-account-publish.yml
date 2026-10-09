@@ -1,0 +1,91 @@
+name: Publish Account PDF Worker Results
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker_repository:
+        description: Account pipeline repository from pdf-worker-lanes.json
+        type: string
+        required: true
+      worker_run_id:
+        description: Completed account worker run
+        type: string
+        required: true
+      stage:
+        type: choice
+        options: [render, ocr]
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-sidecar
+  cancel-in-progress: false
+  queue: max
+
+env:
+  PDF_JXL_ENABLED: "false"
+  PDF_OCR_LANG: auto
+  PDF_OCR_BACKEND: rapidocr_onnxruntime
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Validate worker repository and completed run
+        id: worker
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
+          WORKER_RUN_ID: ${{ inputs.worker_run_id }}
+        run: python scripts/validate_pdf_worker_run.py --repository "$WORKER_REPOSITORY" --run-id "$WORKER_RUN_ID"
+      - uses: actions/download-artifact@v8
+        with:
+          name: pdf-account-queue
+          path: output/pdf-ocr
+          github-token: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          repository: ${{ inputs.worker_repository }}
+          run-id: ${{ inputs.worker_run_id }}
+      - name: Validate queue ownership and configuration generation
+        id: queue
+        env:
+          WORKER_OWNER: ${{ steps.worker.outputs.owner }}
+          STAGE: ${{ inputs.stage }}
+        run: |
+          python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER" --stage "$STAGE" --queue output/pdf-ocr/queue.json
+          echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8
+        if: steps.queue.outputs.shard_count != '0'
+        with:
+          pattern: pdf-account-results-*
+          path: output/pdf-ocr/results
+          github-token: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          repository: ${{ inputs.worker_repository }}
+          run-id: ${{ inputs.worker_run_id }}
+      - run: pip install -r scripts/requirements.txt
+      - name: Publish verified results and retained partial progress
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          STAGE: ${{ inputs.stage }}
+        run: python scripts/pdf_ocr_stages.py "publish-$STAGE" --results-dir output/pdf-ocr/results
+      - name: Publish Reader sidecar to Pages
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PAGES_TOKEN: ${{ secrets.PAGES_TOKEN }}
+          PAGES_REPO: ${{ secrets.PAGES_REPO }}
+          READER_ASSETS_REPO: vomebook/Reader-Assets
+        run: python scripts/publish_search_reader_index.py
+      - name: Advance completed rendering to this account's OCR queue
+        if: inputs.stage == 'render'
+        env:
+          GH_TOKEN: ${{ secrets.PDF_WORKER_READ_TOKEN }}
+          WORKER_REPOSITORY: ${{ inputs.worker_repository }}
+        run: gh workflow run pdf-account-worker.yml --repo "$WORKER_REPOSITORY" --ref main -f stage=ocr -f limit=20

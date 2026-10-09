@@ -7,22 +7,26 @@ import argparse
 import gzip
 import json
 import os
-import tempfile
 import time
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi, sync_bucket
+from huggingface_hub import CommitOperationAdd, HfApi
 from huggingface_hub.errors import HfHubHTTPError
 
 try:
-    from . import pdf_ocr, shared
+    from . import pdf_ocr, shared, reader_lifecycle
     from .reader_assets import READER_ASSETS_REPO
-    from .reader_bucket import INDEX_FILES, read_json as read_bucket_json, read_bytes as read_bucket_bytes
+    from .reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
+                                publish_json, read_json as read_bucket_json,
+                                read_bytes as read_bucket_bytes)
 except ImportError:
     import pdf_ocr
     import shared
+    import reader_lifecycle
     from reader_assets import READER_ASSETS_REPO
-    from reader_bucket import INDEX_FILES, read_json as read_bucket_json, read_bytes as read_bucket_bytes
+    from reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
+                               publish_json, read_json as read_bucket_json,
+                               read_bytes as read_bucket_bytes)
 
 
 OCR_MANIFEST_NAME = "pdf_ocr_manifest.json"
@@ -34,8 +38,8 @@ def load_remote(api: HfApi, repo: str, filename: str, fallback):
     if bucket_name and type(api) is HfApi:
         try:
             return read_bucket_json(INDEX_FILES[bucket_name], os.environ.get("HF_TOKEN"))
-        except (FileNotFoundError, OSError, ValueError):
-            pass
+        except FileNotFoundError:
+            return fallback
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=filename)
     except HfHubHTTPError as exc:
@@ -50,11 +54,11 @@ def load_sidecar(api: HfApi, repo: str) -> dict:
         try:
             data = json.loads(gzip.decompress(read_bucket_bytes(
                 INDEX_FILES["sidecar"], os.environ.get("HF_TOKEN"))).decode("utf-8"))
-            if data.get("v") != 1 or not isinstance(data.get("f"), dict):
-                raise ValueError("invalid Reader bucket sidecar")
-            return data
-        except (FileNotFoundError, OSError, ValueError):
-            pass
+        except FileNotFoundError:
+            return {"v": 1, "f": {}}
+        if data.get("v") != 1 or not isinstance(data.get("f"), dict):
+            raise ValueError("invalid Reader bucket sidecar")
+        return data
     try:
         path = api.hf_hub_download(repo_id=repo, repo_type="dataset", filename=SIDECAR_NAME)
     except HfHubHTTPError as exc:
@@ -90,6 +94,17 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> dict:
     return updated
 
 
+def release_processing_roots(results: list[dict], generation: str, token: str | None) -> None:
+    for result in results:
+        for path in result.get("processing_roots", []):
+            if not isinstance(path, str) or not path.startswith("reader-index/processing/"):
+                raise ValueError("invalid processing root path")
+            record = read_bucket_json(path, token)
+            reader_lifecycle.validate_processing_handoff(record, result)
+            released = reader_lifecycle.release_processing(record, generation)
+            publish_json(path, released, token)
+
+
 def published(current: dict, results: list[dict]) -> bool:
     files = current.get("files", {})
     for result in results:
@@ -110,12 +125,11 @@ def published(current: dict, results: list[dict]) -> bool:
 
 def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> None:
     for attempt in range(attempts):
-        info = api.repo_info(repo_id=repo, repo_type="dataset")
+        bucket_publication = type(api) is HfApi
+        info = None if bucket_publication else api.repo_info(repo_id=repo, repo_type="dataset")
         manifest = load_remote(api, repo, OCR_MANIFEST_NAME, pdf_ocr.empty_manifest())
         if manifest.get("version") != 1 or not isinstance(manifest.get("files"), dict):
             raise ValueError("invalid remote PDF OCR manifest")
-        if published(manifest, results):
-            return
         files = dict(manifest["files"])
         for result in results:
             entry = {key: value for key, value in result.items()
@@ -123,7 +137,13 @@ def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> N
             files[result["key"]] = entry
         updated = {"version": 1, "profile": pdf_ocr.asset_profile(),
                    "files": dict(sorted(files.items()))}
-        sidecar = update_sidecar(load_sidecar(api, repo), results)
+        old_sidecar = load_sidecar(api, repo)
+        sidecar = update_sidecar(old_sidecar, results)
+        if published(manifest, results) and sidecar == old_sidecar:
+            if bucket_publication and os.environ.get("HF_TOKEN"):
+                generation = publish_catalog(sidecar, os.environ.get("HF_TOKEN"))
+                release_processing_roots(results, generation, os.environ.get("HF_TOKEN"))
+            return
         operations = [
             CommitOperationAdd(path_in_repo=OCR_MANIFEST_NAME,
                                path_or_fileobj=(json.dumps(updated, ensure_ascii=False,
@@ -131,19 +151,19 @@ def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> N
             CommitOperationAdd(path_in_repo=SIDECAR_NAME, path_or_fileobj=encode_sidecar(sidecar)),
         ]
         try:
+            if bucket_publication:
+                publish_indexes({
+                    INDEX_FILES["ocr"]: (json.dumps(updated, ensure_ascii=False,
+                                                   sort_keys=True, indent=2) + "\n").encode(),
+                    INDEX_FILES["sidecar"]: encode_sidecar(sidecar),
+                }, os.environ.get("HF_TOKEN"))
+                token = os.environ.get("HF_TOKEN")
+                if token:
+                    generation = publish_catalog(sidecar, token)
+                    release_processing_roots(results, generation, token)
+                return
             api.create_commit(repo_id=repo, repo_type="dataset", operations=operations,
-                              commit_message="Publish PDF OCR metadata", parent_commit=info.sha)
-            if type(api) is HfApi and os.environ.get("HF_TOKEN"):
-                with tempfile.TemporaryDirectory(prefix="pdf-ocr-index-") as root:
-                    index_root = Path(root) / "reader-index"
-                    index_root.mkdir(parents=True, exist_ok=True)
-                    (index_root / "pdf_ocr_manifest.json").write_text(
-                        json.dumps(updated, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                        encoding="utf-8",
-                    )
-                    (index_root / "reader_assets.json.gz").write_bytes(encode_sidecar(sidecar))
-                    sync_bucket(root, "hf://buckets/vomebook/pdf-pages",
-                                 include=["reader-index/**"], token=os.environ["HF_TOKEN"], quiet=False)
+                               commit_message="Publish PDF OCR metadata", parent_commit=info.sha)
             return
         except HfHubHTTPError as exc:
             status = getattr(exc.response, "status_code", None)

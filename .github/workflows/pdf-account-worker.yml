@@ -1,0 +1,145 @@
+name: Account PDF Render and OCR Worker
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Render PDFs or recognize published PNG inputs
+        type: choice
+        options: [render, ocr]
+        default: render
+      limit:
+        description: Maximum pending books in this account's lane
+        type: string
+        default: "20"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pdf-account-worker
+  cancel-in-progress: false
+  queue: max
+
+env:
+  PDF_JXL_ENABLED: "false"
+  PDF_OCR_LANG: auto
+  PDF_OCR_BACKEND: rapidocr_onnxruntime
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      shard_ids: ${{ steps.plan.outputs.shard_ids }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      publisher: ${{ steps.plan.outputs.publisher }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Verify that this account owns a configured lane
+        env:
+          WORKER_OWNER: ${{ github.repository_owner }}
+        run: python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER"
+      - run: pip install -r scripts/requirements.txt
+      - name: Prepare render metadata
+        if: github.event_name == 'schedule' || inputs.stage == 'render'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          FORCE_SYNC: "true"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+          python scripts/fetch_and_parse.py
+      - name: Plan only this account's sources
+        id: plan
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WORKER_OWNER: ${{ github.repository_owner }}
+          STAGE: ${{ inputs.stage || 'render' }}
+          LIMIT: ${{ inputs.limit || '20' }}
+        run: |
+          [[ "$LIMIT" =~ ^[0-9]+$ ]] && ((10#$LIMIT >= 1 && 10#$LIMIT <= 100)) || exit 1
+          lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
+          args=(--worker-owner "$WORKER_OWNER" --worker-lane "$lane" --limit "$LIMIT")
+          if [[ "$STAGE" == render ]]; then
+            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 1500 --retry-failed "${args[@]}"
+          elif [[ "$STAGE" == ocr ]]; then
+            python scripts/pdf_ocr_stages.py plan-ocr "${args[@]}"
+          else
+            exit 1
+          fi
+          echo "shard_ids=$(jq -c '.shard_ids' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "shard_count=$(jq -r '.shard_count' output/pdf-ocr/queue.json)" >> "$GITHUB_OUTPUT"
+          echo "publisher=$(jq -r '.publisher_repository' pdf-worker-lanes.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdf-account-queue
+          path: output/pdf-ocr/queue.json
+          retention-days: 7
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.shard_count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install render dependencies
+        if: github.event_name == 'schedule' || inputs.stage == 'render'
+        run: |
+          pip install -r scripts/requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+      - name: Install OCR dependencies
+        if: inputs.stage == 'ocr'
+        run: pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: pdf-account-queue
+          path: output/pdf-ocr
+      - name: Build immutable account-owned objects
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_INPUT_TOKEN: ${{ secrets.HF_INPUT_TOKEN }}
+          STAGE: ${{ inputs.stage || 'render' }}
+          SHARD: ${{ matrix.shard }}
+        run: python scripts/pdf_ocr_stages.py "$STAGE" --shard "$SHARD"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pdf-account-results-${{ matrix.shard }}
+          path: output/pdf-ocr/bundle/results-*.json
+          retention-days: 7
+          if-no-files-found: warn
+
+  notify:
+    needs: [plan, build]
+    if: always() && !cancelled() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Request serialized publication in the central repository
+        env:
+          GH_TOKEN: ${{ secrets.PDF_PUBLISH_TOKEN }}
+          PUBLISHER: ${{ needs.plan.outputs.publisher }}
+          WORKER_REPOSITORY: ${{ github.repository }}
+          WORKER_RUN_ID: ${{ github.run_id }}
+          STAGE: ${{ inputs.stage || 'render' }}
+        run: |
+          gh workflow run pdf-account-publish.yml --repo "$PUBLISHER" --ref main \
+            -f worker_repository="$WORKER_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f stage="$STAGE"
