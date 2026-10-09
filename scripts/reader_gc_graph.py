@@ -14,11 +14,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 try:
-    from .reader_bucket_store import S3BucketStore
+    from .reader_bucket_store import HubBucketStore, S3BucketStore
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
     from . import reader_lifecycle
 except ImportError:
-    from reader_bucket_store import S3BucketStore
+    from reader_bucket_store import HubBucketStore, S3BucketStore
     from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
     import reader_lifecycle
 
@@ -380,13 +380,14 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--skip-input-bucket", action="store_true")
     parser.add_argument("--record-observations", action="store_true")
+    parser.add_argument("--storage", choices=("hub", "s3"), default="hub")
     parser.add_argument("--grace-days", type=int, default=14)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--generation-grace-days", type=int, default=30)
     args = parser.parse_args()
     if args.grace_days < 1 or args.limit < 0 or args.generation_grace_days < 30:
         parser.error("orphan grace must be positive, generation grace at least 30 days and limit non-negative")
-    store = S3BucketStore()
+    store = HubBucketStore() if args.storage == "hub" else S3BucketStore()
     report = ReferenceGraph(store, not args.skip_input_bucket,
                             args.generation_grace_days).build()
     if report["graph_complete"]:

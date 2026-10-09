@@ -8,10 +8,50 @@ import gzip
 import json
 import os
 import posixpath
+import tempfile
+from pathlib import Path
+from urllib.parse import quote
 
 
 class S3NotFound(FileNotFoundError):
     pass
+
+
+class HubBucketStore:
+    """Current bucket API access with independent credentials for OCR inputs."""
+
+    def __init__(self):
+        from huggingface_hub import HfApi
+        self.api = HfApi(token=os.environ.get("HF_TOKEN"))
+
+    def token(self, bucket):
+        if bucket.startswith("melsm/"):
+            return os.environ.get("HF_INPUT_TOKEN")
+        return os.environ.get("HF_TOKEN")
+
+    def list_files(self, bucket: str, prefixes: tuple[str, ...]) -> set[str]:
+        return {item.path for prefix in prefixes for item in self.api.list_bucket_tree(
+            bucket, prefix=prefix or None, recursive=True, token=self.token(bucket))
+                if item.type == "file"}
+
+    def read_bytes(self, bucket: str, path: str) -> bytes:
+        from huggingface_hub.utils import get_session, hf_raise_for_status
+        token = self.token(bucket)
+        response = get_session().get(
+            f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            follow_redirects=True, timeout=120)
+        if response.status_code == 404:
+            raise FileNotFoundError(path)
+        hf_raise_for_status(response)
+        return response.content
+
+    def put_json(self, bucket: str, path: str, payload: dict) -> None:
+        from huggingface_hub import batch_bucket_files
+        with tempfile.TemporaryDirectory(prefix="reader-gc-state-") as directory:
+            target = Path(directory) / "state.json"
+            target.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+            batch_bucket_files(bucket, add=[(str(target), path)], token=self.token(bucket))
 
 
 class S3BucketStore:

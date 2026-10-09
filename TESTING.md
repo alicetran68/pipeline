@@ -32,9 +32,10 @@ and reads/rechecks every root plus live manifests:
 python3 -B scripts/reader_gc_graph.py --output output/gc/reader-gc-report.json
 ```
 
-Required: main `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`, plus separate
-`HF_S3_INPUT_ACCESS_KEY_ID` / `HF_S3_INPUT_SECRET_ACCESS_KEY` for the `melsm`
-namespace. Bucket references always use the three current qualified names;
+Default Hub access requires `HF_TOKEN` and separate `HF_INPUT_TOKEN` for `melsm`.
+Optional `--storage s3` uses main `HF_S3_ACCESS_KEY_ID` / `HF_S3_SECRET_ACCESS_KEY`
+and separate `HF_S3_INPUT_ACCESS_KEY_ID` / `HF_S3_INPUT_SECRET_ACCESS_KEY`.
+Bucket references always use the three current qualified names;
 `HF_S3_INPUT_BUCKET` pointing to an old bucket does not remap those references.
 `--skip-input-bucket` produces an explicitly incomplete report and exit status 1.
 
@@ -46,8 +47,8 @@ globally. By default no remote state is written. `--record-observations` persist
 first-seen orphan dates only after complete graph acceptance, using a positive
 14-day default grace. Objects past grace are reported, not deleted.
 
-The new `reader-gc.yml` schedules this report and retains
-the artifact for 30 days. It has not been deployed by this change.
+The deployed `reader-gc.yml` schedules this report and retains the artifact for
+30 days. Default and scheduled runs are read-only.
 
 ## Observations On 2026-10-09
 
@@ -65,6 +66,12 @@ Read-only S3 shallow production inventory confirmed these actual prefixes:
 - `melsm/pdf-archive-v2` returned S3 `NoSuchBucket` with the available credentials.
   This does not distinguish missing/private/inaccessible storage. No empty-bucket
   assumption, alternate legacy bucket read or deletion was performed.
+
+Subsequent authenticated Hub inspection found the input bucket present and empty
+before the account rollout. Real worker uploads using `HF_INPUT_TOKEN` succeeded;
+the 368-page devondunn7 render manifest verified every input reference. GC now
+uses the current bucket Hub API by default rather than treating inaccessible S3
+storage as empty. S3 access remains a separate unaccepted optional path.
 
 This was a shallow format inventory, not a complete production reference graph.
 No production orphan totals or production deletion-safety conclusions follow.

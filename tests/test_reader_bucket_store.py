@@ -3,10 +3,21 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.reader_bucket_store import S3BucketStore
+from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_hub_inventory_uses_separate_input_credentials(self):
+        from types import SimpleNamespace
+        with patch.dict("os.environ", {"HF_TOKEN": "reader-token", "HF_INPUT_TOKEN": "input-token"}), \
+                patch("huggingface_hub.HfApi") as api:
+            api.return_value.list_bucket_tree.return_value = [SimpleNamespace(type="file", path="objects/page.png")]
+            store = HubBucketStore()
+            self.assertEqual(store.list_files("melsm/pdf-archive-v2", ("",)), {"objects/page.png"})
+            self.assertEqual(api.return_value.list_bucket_tree.call_args.kwargs["token"], "input-token")
+            store.list_files("vomebook/pdf-pages-v2", ("",))
+            self.assertEqual(api.return_value.list_bucket_tree.call_args.kwargs["token"], "reader-token")
+
     def store(self, client):
         store = S3BucketStore.__new__(S3BucketStore)
         store._location = Mock(return_value=("vomebook", "reader-assets-v2"))

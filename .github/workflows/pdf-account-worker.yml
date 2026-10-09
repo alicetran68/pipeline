@@ -1,4 +1,5 @@
 name: Account PDF Render and OCR Worker
+run-name: PDF ${{ inputs.stage || 'render' }} / ${{ github.repository_owner }}
 
 on:
   schedule:

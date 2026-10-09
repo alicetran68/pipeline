@@ -37,6 +37,8 @@ safe order in which they are used.
 - Older workflow descriptions below include historical paths and concurrency
   limits. Inspect the actual checked-out workflow before acting on them.
 - `PDF_ACCOUNT_WORKERS.md` describes local account lanes and binary protection.
+  Those workflows were deployed and admitted all eight lanes on 2026-10-09;
+  `PDF_WORKER_DEPLOYMENT.md` records exact run evidence and completion boundaries.
   `PDF_PROCESSING.md` describes the current stages and lifecycle limitations.
   `PDF_READING_CYCLE_V3.md` specifies the proposed PDF-primary full-coverage stream,
   OCR/correction and cross-bucket lifecycle redesign; it is not deployed behavior.
@@ -176,7 +178,7 @@ Each section below describes one file in `.github/workflows/`.
 
 ### `reader-gc.yml` - Reader Cross-Bucket GC Report
 
-- **Trigger:** daily at `04:13 UTC`, or manual dispatch; local change, not deployed.
+- **Trigger:** daily at `04:13 UTC`, or manual dispatch; deployed on 2026-10-09.
 - **Action:** `reader_gc_graph.py` inventories all three current buckets, including
   every existing Reader format, and writes an artifact-only JSON report.
 - **Safety:** default report has no remote writes or deletes. Explicit
@@ -186,8 +188,8 @@ Each section below describes one file in `.github/workflows/`.
 - **Roots:** canonical sidecar, category indexes and shard checkpoints, render/OCR
   registries and progress, processing records and known resource-based review
   records. Whole live bundles retain fonts, images and other companion files.
-- **Lock/secrets:** `reader-sidecar`; main HF S3 credentials and separate
-  `HF_S3_INPUT_ACCESS_KEY_ID` / `HF_S3_INPUT_SECRET_ACCESS_KEY` for `melsm`.
+- **Lock/secrets:** `reader-sidecar`; `HF_TOKEN` and separate `HF_INPUT_TOKEN`
+  for `melsm`. Optional S3 CLI access uses the two separate S3 credential pairs.
   Other publishers still have partitioned locks, so this lock alone does not
   establish global deletion safety. The report rechecks root keys and bytes.
 - **Cleanup:** the former asset-only, category-only, static-PDF and dataset-prune

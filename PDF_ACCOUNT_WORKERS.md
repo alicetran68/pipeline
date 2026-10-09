@@ -1,8 +1,9 @@
 # Account PDF Workers
 
 The requested end-to-end redesign is specified in `PDF_READING_CYCLE_V3.md`.
-This file describes the existing local account-worker and binary-preservation
-implementation, not the proposed hybrid Reader/PDF builder/correction/GC cycle.
+The account-worker path was deployed and started on 2026-10-09. This file describes
+that render/OCR and binary-preservation implementation. The proposed v3 document
+builder, correction service and deleting GC are not deployed features.
 
 ## Ownership
 
@@ -10,16 +11,16 @@ implementation, not the proposed hybrid Reader/PDF builder/correction/GC cycle.
 jobs run in each account's own `pipeline` repository; authenticating a dispatch
 with another account's token does not move the job out of the target repository.
 
-| Account | Lane | Original Input |
-| --- | --- | --- |
-| vomebook | native-small | Native PDF below 5 MiB |
-| rioholland79 | native-small-upper | Native PDF from 5 MiB inclusive to 10 MiB exclusive |
-| devondunn7 | native-small-mid | Native PDF from 10 MiB inclusive to 50 MiB exclusive |
-| dellamcastillo | native-medium-lower | Native PDF from 50 MiB inclusive to 100 MiB exclusive |
-| anftm | native-medium | Native PDF from 100 MiB inclusive to 250 MiB exclusive |
-| brodievsalas | native-medium-upper | Native PDF from 250 MiB inclusive to 500 MiB exclusive |
-| alicetran68 | native-large | Native PDF at least 500 MiB, or unknown native size |
-| ambrossee768 | converted | Generated PDFs whose original source is not PDF |
+| Account | Worker Repository | Lane | Original Input |
+| --- | --- | --- | --- |
+| vomebook | vomebook/pdf-pipeline | native-small | Native PDF below 5 MiB |
+| rioholland79 | rioholland79/pipeline | native-small-upper | Native PDF from 5 MiB inclusive to 10 MiB exclusive |
+| devondunn7 | devondunn7/pipeline | native-small-mid | Native PDF from 10 MiB inclusive to 50 MiB exclusive |
+| dellamcastillo | dellamcastillo/pipeline | native-medium-lower | Native PDF from 50 MiB inclusive to 100 MiB exclusive |
+| anftm | anftm/pipeline | native-medium | Native PDF from 100 MiB inclusive to 250 MiB exclusive |
+| brodievsalas | brodievsalas/pipeline | native-medium-upper | Native PDF from 250 MiB inclusive to 500 MiB exclusive |
+| alicetran68 | alicetran68/pipeline | native-large | Native PDF at least 500 MiB, or unknown native size |
+| ambrossee768 | ambrossee768/pdf-pipeline | converted | Generated PDFs whose original source is not PDF |
 
 DJVU, CAJ, KDH and other converted inputs retain their original extension even
 when the readable artifact is PDF. Repaired native PDFs remain in the native
@@ -57,6 +58,9 @@ and account owners and lane names must be unique. Bounds are integer bytes,
 lower-inclusive and upper-exclusive. Unknown sizes go to the last native lane.
 All worker repositories and the publisher must use the same configuration
 generation; queues with an old configuration hash are rejected.
+Optional repository overrides are checked independently by the central run
+validator. They do not change routing fingerprints or invalidate already queued
+work whose source ownership is unchanged.
 
 ## Execution And Publication
 
@@ -115,8 +119,17 @@ On 2026-10-09, supplied PATs authenticated `devondunn7`, `dellamcastillo` and
 username `devonduhn7` was a transcription error; the authenticated login is
 `devondunn7`. Browser/email verification is not required for PAT API access.
 The additional token authenticated `brodievsalas`, which is now assigned the
-250-500 MiB lane. These API checks do not establish
-that worker repositories, Actions secrets or the new workflows are deployed.
+250-500 MiB lane. All eight account repositories, Actions secrets and workflows
+were deployed on 2026-10-09 and admitted actual source books.
+
+The old vomebook/ambrossee768 fork repositories rejected dispatch despite enabled
+API settings. Dedicated `pdf-pipeline` repositories were created for those two
+accounts and their obsolete worker schedules were disabled.
+
+The first verified complete render/central publication was devondunn7 run
+`37954433237` and central run `37955525757`. Its 368-page mixed CCITT/JBIG2 book
+published verified PNG inputs without WebP reading recompression, then automatically
+started OCR run `37955635656`. See `PDF_WORKER_DEPLOYMENT.md` for run evidence.
 
 ## Verification
 
