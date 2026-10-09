@@ -312,7 +312,7 @@ def validate_manifest(manifest: dict) -> dict:
                 validate_chapter_manifest_path(entry["chapter_manifest"])
             if "fallback_path" in entry:
                 validate_object_path(entry["fallback_path"])
-            if entry.get("chapter_bucket") not in {None, "vomebook/pdf-pages"}:
+            if entry.get("chapter_bucket") not in {None, READER_ASSETS_BUCKET}:
                 raise ValueError("invalid chapter bucket")
             if "chapter_manifest" in entry and not entry["chapter_manifest"].endswith("/chapter-manifest.json"):
                 raise ValueError("invalid chapter manifest path")

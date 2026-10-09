@@ -19,7 +19,7 @@ class RunPdfOcrTests(unittest.TestCase):
             (root / "ocr-manifest.json").write_text("{}")
             with patch.object(run_pdf_ocr, "sync_bucket") as sync:
                 run_pdf_ocr.upload_ocr_objects(bundle)
-            self.assertEqual(sync.call_args.args, (str(root), f"hf://buckets/vomebook/pdf-pages/{relative.as_posix()}"))
+            self.assertEqual(sync.call_args.args, (str(root), f"hf://buckets/vomebook/pdf-pages-v2/{relative.as_posix()}"))
             self.assertIsNone(sync.call_args.kwargs["include"])
 
     def test_bucket_sync_honors_retry_after(self):

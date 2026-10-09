@@ -2359,7 +2359,9 @@ def convert_item(item: dict, bundle: Path, reusable: dict | None = None) -> dict
             if not target.exists():
                 if existing:
                     try:
-                        asset_url = f"https://huggingface.co/datasets/{READER_ASSETS_REPO}/resolve/main/{existing['path']}"
+                        existing_bucket = existing.get("bucket") or shared.READER_ASSETS_BUCKET
+                        asset_url = (f"https://huggingface.co/buckets/{existing_bucket}/resolve/"
+                                     f"{existing['path']}")
                         download_existing(asset_url, target, existing["sha256"])
                     except Exception as error:
                         if not is_remote_not_found(error):
