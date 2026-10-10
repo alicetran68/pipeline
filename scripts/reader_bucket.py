@@ -6,9 +6,12 @@ import os
 import tempfile
 import gzip
 import hashlib
+import time
+from urllib.parse import quote
 from pathlib import Path
 
-from huggingface_hub import HfFileSystem, batch_bucket_files
+from huggingface_hub import batch_bucket_files
+from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from .reader_assets import READER_ASSETS_BUCKET
@@ -38,11 +41,25 @@ def bucket_uri(path: str, bucket: str = READER_ASSETS_BUCKET) -> str:
 
 
 def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_BUCKET) -> bytes:
-    fs = HfFileSystem(token=token)
-    # Bucket writes use the Hub API, outside this filesystem's metadata cache.
-    fs.invalidate_cache()
-    with fs.open(bucket_uri(path, bucket), "rb") as stream:
-        return stream.read()
+    """Read one immutable bucket object without a metadata/tree API call."""
+    session = get_session()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}"
+    for attempt in range(6):
+        response = session.get(url, headers=headers, follow_redirects=True, timeout=120)
+        if response.status_code == 404:
+            raise FileNotFoundError(path)
+        if response.status_code in {408, 429, 500, 502, 503, 504} and attempt < 5:
+            retry_after = response.headers.get("retry-after")
+            try:
+                delay = min(60, max(1, int(retry_after))) if retry_after else min(30, 2 ** attempt)
+            except ValueError:
+                delay = min(30, 2 ** attempt)
+            time.sleep(delay)
+            continue
+        hf_raise_for_status(response)
+        return response.content
+    raise RuntimeError(f"bucket read retry limit exceeded: {bucket}:{path}")
 
 
 def read_json(path: str, token: str | None = None, bucket: str = READER_ASSETS_BUCKET) -> dict:

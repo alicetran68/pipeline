@@ -69,7 +69,7 @@ jobs:
           lane=$(python scripts/pdf_worker_lanes.py --owner "$WORKER_OWNER")
           args=(--worker-owner "$WORKER_OWNER" --worker-lane "$lane" --limit "$LIMIT")
           if [[ "$STAGE" == render ]]; then
-            python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 1500 --retry-failed "${args[@]}"
+             python scripts/pdf_ocr_stages.py plan-render --native-text-stream --target-render-seconds 6000 --retry-failed "${args[@]}"
           elif [[ "$STAGE" == ocr ]]; then
             python scripts/pdf_ocr_stages.py plan-ocr "${args[@]}"
           else
