@@ -232,7 +232,7 @@ class PdfWorkerLaneTests(unittest.TestCase):
         self.assertNotIn("publish-render", worker_commands)
         self.assertNotIn("publish-ocr", worker_commands)
         self.assertNotIn("publish_search_reader_index.py", worker_commands)
-        self.assertEqual(worker["jobs"]["build"]["strategy"]["max-parallel"], 2)
+        self.assertEqual(worker["jobs"]["build"]["strategy"]["max-parallel"], 4)
         self.assertEqual(publisher["concurrency"]["group"], "reader-sidecar")
         for workflow in (worker, publisher):
             for job in workflow["jobs"].values():

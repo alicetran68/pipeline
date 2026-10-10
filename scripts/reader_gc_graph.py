@@ -43,6 +43,8 @@ MANIFEST_KINDS = {
     "pdf-ocr", "ebook-chapters", "pdf-derived-source", "office-document-stream",
     "spreadsheet-html-stream", "text-document-stream", "web-document-stream",
     "static-pdf-stream", "pdf-document-stream", "static-pdf-document-stream", "epub-chapters",
+    "pdf-text-layer-index", "pdf-text-partition", "pdf-text-review",
+    "pdf-reading", "pdf-preview-partition",
 }
 
 
@@ -178,7 +180,7 @@ class ReferenceGraph:
                 bucket, explicit = context, True
             for key, item in value.items():
                 if key in {"orphans", "source_url", "source_path", "source", "text", "error",
-                           "processing_roots", "observations"}:
+                           "processing_roots", "observations", "components"}:
                     continue
                 if key == "path" and (value.get("kind") in {"pdf-render", "pdf-render-range"} or (
                         value.get("repo") and "new_path" not in value and any(
@@ -209,7 +211,28 @@ class ReferenceGraph:
 
     def validate(self, payload: dict, bucket: str, path: str) -> bool:
         if is_root(path):
-            if "lifecycle" in posixpath.basename(path):
+            if payload.get("kind") in {"reader-v3-automation", "reader-v3-correction-state"}:
+                if (payload.get("version") != 1 or not isinstance(payload.get("tasks"), dict)
+                        or not isinstance(payload.get("days"), dict)
+                        or any(not isinstance(task, dict) for task in payload["tasks"].values())):
+                    self.blockers.add(f"invalid v3 task state: {bucket}:{path}")
+                    return False
+            elif payload.get("kind") == "pdf-text-correction":
+                try:
+                    try:
+                        from .pdf_text_layer import sha
+                    except ImportError:
+                        from pdf_text_layer import sha
+                    for field in ("base_generation", "raw_sha256", "page_identity"):
+                        sha(payload.get(field))
+                    if (payload.get("version") != 1 or type(payload.get("page")) is not int
+                            or payload["page"] < 1 or not isinstance(payload.get("replacements"), list)
+                            or not isinstance(payload.get("evidence"), dict)):
+                        raise ValueError("invalid proposal")
+                except (ValueError, TypeError):
+                    self.blockers.add(f"invalid v3 correction proposal: {bucket}:{path}")
+                    return False
+            elif "lifecycle" in posixpath.basename(path):
                 if not isinstance(payload.get("orphans", {}), dict):
                     self.blockers.add(f"invalid lifecycle: {bucket}:{path}")
                     return False
@@ -249,6 +272,17 @@ class ReferenceGraph:
             if payload.get("kind") not in MANIFEST_KINDS:
                 self.blockers.add(f"unknown manifest kind: {bucket}:{path}")
                 return False
+            if payload.get("kind") in {"pdf-text-layer-index", "pdf-reading"}:
+                try:
+                    try:
+                        from .pdf_reading_v3 import validate_text_manifest, validate_reading_manifest
+                    except ImportError:
+                        from pdf_reading_v3 import validate_text_manifest, validate_reading_manifest
+                    validator = validate_text_manifest if payload["kind"] == "pdf-text-layer-index" else validate_reading_manifest
+                    validator(payload)
+                except (ValueError, KeyError, TypeError):
+                    self.blockers.add(f"invalid v3 manifest: {bucket}:{path}")
+                    return False
             if payload.get("kind") in {"pdf-pages", "image-page-stream", "image-pages"}:
                 count = payload.get("page_count")
                 if type(count) is not int or count < 1:

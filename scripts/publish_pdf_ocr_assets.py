@@ -149,6 +149,16 @@ def verify_ready_objects(result: dict) -> None:
             or text.get("complete") is not True or text.get("page_count") != count
             or [page.get("page") for page in text.get("pages", [])] != list(range(1, count + 1))):
         raise ValueError("published book text is incomplete")
+    if manifest.get("text_layer") is not None:
+        try:
+            from .pdf_reading_v3 import verify_text_bundle
+        except ImportError:
+            from pdf_reading_v3 import verify_text_bundle
+        if text.get("text_layer") != manifest["text_layer"] or result.get("text_layer") != manifest["text_layer"]:
+            raise ValueError("published text layer reference mismatch")
+        def read(ref):
+            return read_bucket_bytes(ref["path"], token, bucket=ref["bucket"])
+        verify_text_bundle(manifest["text_layer"], read, result["source_sha256"], count)
 
 
 def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> None:

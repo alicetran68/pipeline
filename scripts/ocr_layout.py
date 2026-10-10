@@ -176,7 +176,7 @@ def inline_boundary(previous, current, mode, width, height):
     return " "
 
 
-def arrange(blocks, width, height, options=None):
+def arrange(blocks, width, height, options=None, *, include_writing_modes=False):
     options = validate_options(options)
     original = copy.deepcopy(blocks)
     working = [{**copy.deepcopy(b), "id": index} for index, b in enumerate(blocks) if b.get("t")]
@@ -224,7 +224,8 @@ def arrange(blocks, width, height, options=None):
                 start = len(text)
                 text += block["t"]
                 spans.append({"start": start, "end": len(text), "block": block["id"],
-                              "box": block["b"], "precision": "block", "region": group_index})
+                               "box": block["b"], "precision": "block", "region": group_index,
+                               **({"writing_mode": partition_mode} if include_writing_modes else {})})
                 ordered.append(block)
                 previous = block
             group_index += 1

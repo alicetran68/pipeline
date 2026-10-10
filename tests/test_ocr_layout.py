@@ -115,6 +115,17 @@ class OcrLayoutTests(unittest.TestCase):
         self.assertEqual(blocks[0]["b"], [.1, .2, .3, .4])
         self.assertEqual(blocks[0]["q"], [[.1, .2], [.3, .2], [.3, .4], [.1, .4]])
 
+    def test_rtl_text_layer_metadata_keeps_unverified_recognizer_order(self):
+        from scripts import pdf_text_layer
+        for word in ("كتاب", "שלום"):
+            result = layout.arrange([block(word, [.1, .1, .4, .2])], 1000, 1000)
+            self.assertEqual(result["text"], word)
+            page = {"kind": "pdf-ocr-page", "page": 1, "width": 1000, "height": 1000,
+                    "source": "ocr", **result}
+            layer = pdf_text_layer.from_page(page, "a" * 64)
+            self.assertEqual(layer["regions"][0]["direction"], "rtl")
+            self.assertIn("bidi-order-needs-review", layer["review_flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

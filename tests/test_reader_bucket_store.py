@@ -1,12 +1,22 @@
 import io
 import json
 import unittest
+import os
+import subprocess
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts.reader_bucket_store import HubBucketStore, S3BucketStore
 
 
 class ReaderBucketStoreTests(unittest.TestCase):
+    def test_legacy_environment_cannot_remap_the_current_input_bucket(self):
+        result = subprocess.check_output(["python3", "-B", "-c",
+            "from scripts.shared import PDF_OCR_INPUT_BUCKET; print(PDF_OCR_INPUT_BUCKET)"],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "PDF_OCR_INPUT_BUCKET": "pdf-jxl"}, text=True)
+        self.assertEqual(result.strip(), "melsm/pdf-archive-v2")
+
     def test_hub_inventory_uses_separate_input_credentials(self):
         from types import SimpleNamespace
         with patch.dict("os.environ", {"HF_TOKEN": "reader-token", "HF_INPUT_TOKEN": "input-token"}), \

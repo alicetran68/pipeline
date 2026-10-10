@@ -2,6 +2,8 @@
 """Publish the compact Reader Assets sidecar to HF Search and GitHub Pages."""
 
 import base64
+import gzip
+import json
 import os
 import shutil
 import subprocess
@@ -13,9 +15,13 @@ from huggingface_hub import HfApi
 try:
     from .reader_assets import READER_ASSETS_REPO
     from .reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
+    from .publish_reader_v3 import current as current_v3, project_sidecar
+    from .reader_bucket_store import HubBucketStore
 except ImportError:
     from reader_assets import READER_ASSETS_REPO
     from reader_bucket import INDEX_FILES, read_bytes as read_bucket_bytes
+    from publish_reader_v3 import current as current_v3, project_sidecar
+    from reader_bucket_store import HubBucketStore
 
 SIDECAR_NAME = "reader_assets.json.gz"
 
@@ -84,13 +90,16 @@ def main() -> int:
     source = None
     temporary_source = False
     if type(api) is HfApi:
-        try:
-            with tempfile.NamedTemporaryFile(prefix="reader-index-", suffix=".gz", delete=False) as handle:
-                handle.write(read_bucket_bytes(INDEX_FILES["sidecar"], hf_token))
-                source = Path(handle.name)
-                temporary_source = True
-        except (FileNotFoundError, OSError, ValueError):
-            source = None
+        raw = read_bucket_bytes(INDEX_FILES["sidecar"], hf_token)
+        pointer, catalog = current_v3(HubBucketStore())
+        if pointer:
+            base = json.loads(gzip.decompress(raw))
+            raw = gzip.compress(json.dumps(project_sidecar(base, catalog), ensure_ascii=False,
+                                           sort_keys=True, separators=(",", ":")).encode(), mtime=0)
+        with tempfile.NamedTemporaryFile(prefix="reader-index-", suffix=".gz", delete=False) as handle:
+            handle.write(raw)
+            source = Path(handle.name)
+            temporary_source = True
     if source is None:
         source = Path(api.hf_hub_download(
             repo_id=args.assets_repo, repo_type="dataset", filename=SIDECAR_NAME,

@@ -50,6 +50,20 @@ class ReaderLifecycleTests(unittest.TestCase):
         self.assertEqual(released["status"], "released")
         self.assertEqual(reader_lifecycle.release_processing(released, "generation"), released)
 
+    def test_catalog_compaction_keeps_current_and_unacked_history(self):
+        catalog = {"version": 1, "kind": "reader-catalog", "current": {"generation": "new"},
+                   "generations": {
+                       "new": {"generation": "new", "status": "current"},
+                       "recent": {"generation": "recent", "status": "superseded",
+                                  "superseded_at": "2026-10-01T00:00:00+00:00",
+                                  "replacement_acks": {"hf": True, "pages": True}},
+                       "unacked": {"generation": "unacked", "status": "superseded",
+                                   "superseded_at": "2026-01-01T00:00:00+00:00",
+                                   "replacement_acks": {"hf": True, "pages": False}}}}
+        compacted = reader_lifecycle.compact_catalog(
+            catalog, "new", datetime(2026, 11, 15, tzinfo=timezone.utc), 30)
+        self.assertEqual(set(compacted["generations"]), {"new", "unacked"})
+
 
 if __name__ == "__main__":
     unittest.main()

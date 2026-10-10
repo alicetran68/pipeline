@@ -184,6 +184,11 @@ class PdfOcrStagesTests(unittest.TestCase):
             self.assertEqual([p["text"] for p in text["pages"]], ["原生文字", "识别结果"])
             self.assertTrue(manifest["complete"])
             self.assertEqual(manifest["page_manifest"], result["page_manifest"])
+            from scripts.pdf_reading_v3 import verify_text_bundle
+            index = verify_text_bundle(completed["text_layer"], self.read, completed["source_sha256"], 2)
+            self.assertEqual(index["revision"], "raw")
+            self.assertEqual(index["quality"], "unreviewed")
+            self.assertEqual(text["text_layer"], completed["text_layer"])
 
     def test_page_checksum_failure_does_not_publish_ready(self):
         result = self.render_fixture()

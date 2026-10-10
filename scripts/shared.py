@@ -11,7 +11,7 @@ from typing import TypeVar
 
 CHUNK_BYTES = 1024 * 1024
 PDF_PAGES_BUCKET = "vomebook/pdf-pages-v2"
-PDF_OCR_INPUT_BUCKET = os.environ.get("PDF_OCR_INPUT_BUCKET", "melsm/pdf-archive-v2")
+PDF_OCR_INPUT_BUCKET = "melsm/pdf-archive-v2"
 READER_ASSETS_BUCKET = "vomebook/reader-assets-v2"
 
 T = TypeVar("T")

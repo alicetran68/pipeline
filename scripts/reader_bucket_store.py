@@ -53,6 +53,10 @@ class HubBucketStore:
             target.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
             batch_bucket_files(bucket, add=[(str(target), path)], token=self.token(bucket))
 
+    def put_bytes(self, bucket: str, path: str, payload: bytes) -> None:
+        from huggingface_hub import batch_bucket_files
+        batch_bucket_files(bucket, add=[(payload, path)], token=self.token(bucket))
+
 
 class S3BucketStore:
     def __init__(self) -> None:

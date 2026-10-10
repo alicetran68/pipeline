@@ -30,11 +30,11 @@ from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
-    from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle
+    from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_catalog, read_json as read_bucket_json
 except ImportError:
-    import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle
+    import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
     import pdf_render_schedule
     import pdf_worker_lanes
     from run_pdf_ocr import source_path, _bucket_retry_delay
@@ -109,7 +109,8 @@ def upload_objects(bundle: Path) -> list[str]:
             protection_paths.append(protection_path)
             retry(lambda: api.sync_bucket(
                 str(root), f"{BUCKET}/{relative}",
-                include=["pages/*.webp", "ocr/**", "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
+                include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
+                         "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
                          "render-range-*.json"], quiet=True))
             retry(lambda: api.sync_bucket(
                 str(root), f"{OCR_INPUT_BUCKET}/{relative}",
@@ -935,32 +936,42 @@ def assemble_book(book, saved, bundle):
     pages = [p if p["source"] == "native" else saved.get(str(p["p"])) for p in book["pages"]]
     if any(p is None for p in pages):
         return {**base, "status": "failed", "error": "OCR pages incomplete; uploaded pages retained for retry"}
-    texts = []
+    texts, layers = [], []
+    language, backend = pdf_ocr.book_ocr_config(book)
     for page in pages:
         payload = json.loads(gzip.decompress(read_object(page_meta(page, "o"), ".json.gz")))
         if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
                 or payload.get("source") != page["source"]):
             raise ValueError("OCR page payload mismatch")
+        config = book.get("layout_options", {})
+        options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
         if page["source"] == "native":
-            config = book.get("layout_options", {})
-            options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
             # Native extraction is already in original page coordinates.
             options.pop("rotation", None)
             if payload["blocks"]:
-                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options))
+                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options,
+                                                  include_writing_modes=True))
             else:
                 payload["text_spans"] = []
                 payload["layout"] = {"version": ocr_layout.VERSION, "writing_mode": "auto",
                                      "review": ["native-text-without-positioned-blocks"] if payload["text"] else [],
                                      "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
+        raw_ref = {"bucket": shared.PDF_PAGES_BUCKET, **page_meta(page, "o"), "role": "provenance"}
+        layer = pdf_text_layer.from_page(payload, book["source_sha256"], language, raw_ref,
+                                         layout_options=options)
+        layers.append(layer)
         texts.append({"page": page["p"], "text": payload["text"],
-                      "layout": payload["layout"], "text_spans": payload["text_spans"]})
-    language, backend = pdf_ocr.book_ocr_config(book)
-    root = root_for(book["source_sha256"], book["key"], book["render_manifest"]["sha256"] + book["profile"])
+                       "layout": payload["layout"], "text_spans": payload["text_spans"],
+                       "text_generation": layer["generation"], "quality": layer["quality"],
+                       "review_flags": layer["review_flags"]})
+    root = root_for(book["source_sha256"], book["key"],
+                    book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v2-search-partitions")
+    text_layer_ref = pdf_reading_v3.build_text_bundle(layers, pages, root, bundle)
     text_path = bundle / root / "ocr" / "book-text.json.gz"
     pdf_ocr.write_gzip_json(text_path, {"version": 2, "kind": "pdf-book-text", "complete": True,
                                       "source_sha256": book["source_sha256"], "page_count": book["page_count"],
                                       "offset_unit": "unicode-codepoint", "profile": book["profile"],
+                                      "revision": "raw", "quality": "unreviewed", "text_layer": text_layer_ref,
                                       "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
                                       "pages": texts})
     manifest_path = bundle / root / "ocr-manifest.json"
@@ -972,12 +983,15 @@ def assemble_book(book, saved, bundle):
         "source_bytes": book["source_bytes"], "source_revision": book.get("source_revision", ""),
         "classification": book["classification"], "page_count": book["page_count"],
         "dpi": pdf_ocr.OCR_DPI, "pages": pages, "book_text": metadata(text_path, bundle),
+        "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed",
+        "layout_options": book.get("layout_options", {}),
         **({"page_manifest": book["page_manifest"]} if book.get("page_manifest") else {}),
     })
     meta = metadata(manifest_path, bundle)
     return {**base, "status": "ready", "language": language, "ocr_version": pdf_ocr.resolve_ocr_config(language, backend)[1],
             "backend": backend, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
-            "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"]}
+            "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"],
+            "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed"}
 
 
 def read_results(paths):

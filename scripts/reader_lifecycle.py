@@ -102,6 +102,7 @@ def catalog_generation(sidecar: dict, parent: dict | None = None,
                    "generations": dict(parent.get("generations") or {})}
     previous = catalog.get("current") or {}
     parent_id = previous.get("generation") if isinstance(previous, dict) else None
+    catalog = compact_catalog(catalog, parent_id, now, 30)
     refs = sidecar_references(sidecar) if references is None else references
     normalized = sorted({(item["bucket"], item["path"]) for item in refs})
     digest = hashlib.sha256(json.dumps(sidecar, ensure_ascii=False, sort_keys=True,
@@ -161,6 +162,17 @@ def generation_live(entry: dict, current: str | None, now=None, grace_days: int 
         return True
     acks = entry.get("replacement_acks")
     return not (isinstance(acks, dict) and acks.get("hf") is True and acks.get("pages") is True)
+
+
+def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 30) -> dict:
+    """Bound catalog history after supersession and both consumer acknowledgments."""
+    if catalog.get("version") != CATALOG_VERSION or not isinstance(catalog.get("generations"), dict):
+        raise ValueError("invalid Reader catalog")
+    generations = {
+        generation: entry for generation, entry in catalog["generations"].items()
+        if generation == current or generation_live(entry, current, now, grace_days)
+    }
+    return {**catalog, "generations": generations}
 
 
 def asset_record(result: dict) -> dict:

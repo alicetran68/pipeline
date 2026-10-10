@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import json
 import tempfile
 import unittest
@@ -43,6 +44,52 @@ class MemoryStore:
 
 
 class ReaderGcGraphTests(unittest.TestCase):
+    def test_v3_automation_and_model_proposals_keep_pinned_inputs(self):
+        store = MemoryStore()
+        primary = "derived/migration-test/" + "a" * 32 + "/document.pdf"
+        source = "objects/aa/source/ocr/page-000001.json.gz"
+        store.put(PDF, primary, b"pdf")
+        store.put(PDF, source, b"raw text")
+        def ref(path):
+            return {"bucket": PDF, "path": path, "sha256": "a" * 64, "bytes": 1, "role": "provenance"}
+        store.put(ASSETS, "reader-index/v3/automation.json", {"version": 1, "kind": "reader-v3-automation",
+            "tasks": {"task": {"spec": {"primary": ref(primary)}}}, "days": {}})
+        store.put(ASSETS, "reader-index/v3/corrections/state.json", {"version": 1, "kind": "reader-v3-correction-state",
+            "tasks": {"task": {"text_layer": ref(source)}}, "days": {}})
+        store.put(ASSETS, "reader-index/v3/corrections/proposals/task/proposal.json", {
+            "version": 1, "kind": "pdf-text-correction", "page": 1,
+            "base_generation": "a" * 64, "raw_sha256": "b" * 64, "page_identity": "c" * 64,
+            "replacements": [], "evidence": {"primary": ref(primary)}})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertTrue(all(not value["candidates"] for value in report["buckets"].values()))
+
+    def test_v3_text_review_retains_cross_bucket_evidence_and_raw_provenance(self):
+        from scripts import pdf_reading_v3 as v3, pdf_text_layer as text
+        from tests.test_pdf_text_layer import raw_page
+        store = MemoryStore()
+        raw_path = "objects/aa/raw/ocr/page-000001.json.gz"
+        raw = raw_page("Text", .1)
+        raw_bytes = gzip.compress(json.dumps(raw).encode())
+        raw_ref = {"bucket": PDF, "path": raw_path, "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                   "bytes": len(raw_bytes), "role": "provenance"}
+        store.objects[PDF][raw_path] = raw_bytes
+        layer = text.from_page(raw, "a" * 64, "en", raw_ref)
+        evidence_path = "objects/aa/input/ocr-input/page-000001.png"
+        evidence = b"lossless evidence"
+        store.put(INPUT, evidence_path, evidence)
+        page = {"p": 1, "i": evidence_path, "is": hashlib.sha256(evidence).hexdigest(), "ib": len(evidence)}
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            ref = v3.build_text_bundle([layer], [page], Path("objects/aa/" + "a" * 64 + "/" + "b" * 16), bundle)
+            for path in bundle.rglob("*"):
+                if path.is_file():
+                    store.objects[PDF][path.relative_to(bundle).as_posix()] = path.read_bytes()
+        store.put(ASSETS, "reader-index/text-generation.json", {"resources": [ref]})
+        report = gc.ReferenceGraph(store).build()
+        self.assertTrue(report["graph_complete"], report["blockers"])
+        self.assertTrue(all(not b["candidates"] for b in report["buckets"].values()))
+
     def test_pdf_range_only_reference_protects_png_jxl_and_native_text(self):
         store = MemoryStore()
         root = "objects/aa/book/render"
@@ -266,10 +313,12 @@ class ReaderGcGraphTests(unittest.TestCase):
         self.assertFalse(report["graph_complete"])
         self.assertEqual(report["buckets"][INPUT]["unreferenced"], [])
 
-    def test_scheduled_gc_is_artifact_only_under_the_sidecar_lock(self):
+    def test_scheduled_gc_is_artifact_only_without_blocking_writers(self):
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/reader-gc.yml").read_text())
-        self.assertEqual(workflow["concurrency"]["group"], "reader-sidecar")
+        self.assertIn("reader-gc-report", workflow["concurrency"]["group"])
+        self.assertIn("reader-sidecar", workflow["concurrency"]["group"])
+        self.assertIn("record_observations", workflow["concurrency"]["group"])
         commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["gc"]["steps"])
         self.assertIn("python scripts/reader_gc_graph.py", commands)
         self.assertNotIn("--apply", commands)
@@ -337,6 +386,28 @@ class ReaderGcGraphTests(unittest.TestCase):
 
 
 class CanonicalOcrPublicationTests(unittest.TestCase):
+    def test_ready_publication_verifies_manifest_text_checksums_and_page_order(self):
+        root = "objects/aa/" + "a" * 64 + "/" + "b" * 16
+        text_path = root + "/ocr/book-text.json.gz"
+        text = gzip.compress(json.dumps({"kind": "pdf-book-text", "version": 2,
+            "complete": True, "page_count": 2, "pages": [{"page": 1}, {"page": 2}]}).encode())
+        manifest = json.dumps({"kind": "pdf-ocr", "complete": True, "page_count": 2,
+            "source_sha256": "a" * 64, "pages": [{"p": 1}, {"p": 2}], "book_text": {
+                "path": text_path, "bytes": len(text), "sha256": hashlib.sha256(text).hexdigest()}}).encode()
+        result = {"ocr_manifest": root + "/ocr-manifest.json", "page_count": 2,
+            "source_sha256": "a" * 64, "ocr_manifest_bytes": len(manifest),
+            "ocr_manifest_sha256": hashlib.sha256(manifest).hexdigest()}
+        with patch.object(publication, "read_bucket_bytes", side_effect=[manifest, text]) as read:
+            publication.verify_ready_objects(result)
+        self.assertTrue(all(call.kwargs["bucket"] == PDF for call in read.call_args_list))
+        malformed = json.loads(manifest)
+        malformed["pages"] = [{"p": 2}, {"p": 1}]
+        raw = json.dumps(malformed).encode()
+        with patch.object(publication, "read_bucket_bytes", return_value=raw):
+            with self.assertRaises(ValueError):
+                publication.verify_ready_objects({**result, "ocr_manifest_bytes": len(raw),
+                    "ocr_manifest_sha256": hashlib.sha256(raw).hexdigest()})
+
     def test_catalog_snapshot_precedes_pointer_and_does_not_claim_consumer_acceptance(self):
         sidecar = {"v": 1, "f": {"book": {"p": "objects/book/document.pdf", "b": PDF}}}
         writes = []

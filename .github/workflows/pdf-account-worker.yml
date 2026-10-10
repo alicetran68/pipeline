@@ -55,7 +55,7 @@ jobs:
           FORCE_SYNC: "true"
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
           python scripts/fetch_and_parse.py
       - name: Plan only this account's sources
         id: plan
@@ -92,7 +92,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
@@ -105,7 +105,7 @@ jobs:
         run: |
           pip install -r scripts/requirements.txt
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
+          sudo apt-get install -y --no-install-recommends poppler-utils poppler-data fonts-noto-cjk fonts-liberation
       - name: Install OCR dependencies
         if: inputs.stage == 'ocr'
         run: pip install -r scripts/requirements.txt -r scripts/requirements-pdf-ocr.txt
