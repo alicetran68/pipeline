@@ -1,3 +1,11 @@
 output/
 __pycache__/
 *.pyc
+
+# Local documentation; only the repository README.md is published.
+*.[mM][dD]
+*.[mM][dD][xX]
+*.[mM][aA][rR][kK][dD][oO][wW][nN]
+*.[rR][sS][tT]
+*.[aA][dD][oO][cC]
+!/[rR][eE][aA][dD][mM][eE].[mM][dD]
