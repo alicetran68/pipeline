@@ -107,15 +107,18 @@ def upload_objects(bundle: Path) -> list[str]:
             protection_path = index_path(f"processing/{uuid.uuid4().hex}.json")
             retry(lambda: publish_json(protection_path, record, os.environ.get("HF_TOKEN")))
             protection_paths.append(protection_path)
-            retry(lambda: api.sync_bucket(
-                str(root), f"{BUCKET}/{relative}",
-                include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
-                         "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
-                         "render-range-*.json"], quiet=True))
-            retry(lambda: api.sync_bucket(
-                str(root), f"{OCR_INPUT_BUCKET}/{relative}",
-                 include=["ocr-input/**", "pages/*.jxl"], quiet=True,
-                 token=os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")))
+            with reader_lifecycle.processing_heartbeat(record,
+                    lambda value: publish_json(protection_path, value, os.environ.get("HF_TOKEN"))):
+                retry(lambda: api.sync_bucket(
+                    str(root), f"{BUCKET}/{relative}",
+                    include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
+                             "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
+                             "render-range-*.json"], quiet=True))
+                retry(lambda: api.sync_bucket(
+                    str(root), f"{OCR_INPUT_BUCKET}/{relative}",
+                     include=["ocr-input/**", "pages/*.jxl"], quiet=True,
+                     token=os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")))
+            record = reader_lifecycle.heartbeat_processing(record)
             record.update(status="uploaded", updated_at=reader_lifecycle.now_iso())
             retry(lambda: publish_json(protection_path, record, os.environ.get("HF_TOKEN")))
     return protection_paths
@@ -335,6 +338,19 @@ def same_source(entry, item):
     return bool(entry and entry.get("source_revision") == item.get("source_revision")
                 and entry.get("source_kind") == item.get("source_kind")
                 and entry.get("reader_assets_path") == item.get("reader_assets_path"))
+
+
+def ocr_publication_is_current(previous, book):
+    """Reject stale zero-shard republishes after an identical OCR publication."""
+    return bool(previous and previous.get("status") in {"ready", "skipped"}
+                and isinstance(book.get("source_sha256"), str) and len(book["source_sha256"]) == 64
+                and previous.get("source_sha256") == book.get("source_sha256")
+                and previous.get("source_revision") == book.get("source_revision")
+                and previous.get("source_kind") == book.get("source_kind")
+                and previous.get("profile") == book.get("profile")
+                and previous.get("page_count") == book.get("page_count")
+                and previous.get("render_manifest") == book.get("render_manifest")
+                and previous.get("page_manifest") == book.get("page_manifest"))
 
 
 def render_partition_matches(item, partition):
@@ -1177,6 +1193,20 @@ def main():
         raise ValueError("invalid stage queue")
     if args.stage == "publish-ocr":
         results = read_results(result_paths(args.results, args.results_dir, bool(queue["shards"])))
+        current = load_registry(api, repo, publication.OCR_MANIFEST_NAME)["files"]
+        current_books = {book["key"] for book in queue["books"]
+                         if ocr_publication_is_current(current.get(book["key"]), book)}
+        if current_books:
+            queue = {**queue,
+                     "books": [book for book in queue["books"] if book["key"] not in current_books],
+                     "shards": [{**shard, "records": [record for record in shard["records"]
+                                                         if record["key"] not in current_books]}
+                                for shard in queue["shards"]]}
+            results = [result for result in results if result.get("key") not in current_books]
+            queue["shards"] = [shard for shard in queue["shards"] if shard["records"]]
+            if not queue["books"]:
+                print(f"ocr publication: skipped {len(current_books)} already-ready books", flush=True)
+                return 0
         updates = collect_progress(queue, results)
         save_registry(api, repo, PROGRESS_REGISTRY, updates, merge_progress)
         completed = []

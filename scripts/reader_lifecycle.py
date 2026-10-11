@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 import hashlib
 import json
+import threading
 try:
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
 except ImportError:
@@ -17,6 +19,11 @@ CATALOG_VERSION = 1
 CATALOG_NAME = "reader_catalog.json"
 PROCESSING_PREFIX = "processing/"
 TERMINAL_SUCCESS = {"done", "skipped"}
+
+
+def valid_processing_root(bucket, root):
+    return (isinstance(root, str) and (
+        root.startswith("objects/") or bucket == READER_ASSETS_BUCKET and root.startswith("pages/image/")))
 
 
 def now_iso() -> str:
@@ -32,14 +39,46 @@ def processing_record(resources: list[dict], operation: str, run: dict) -> dict:
     if not resources or any(not isinstance(item, dict)
                             or item.get("bucket") not in {READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET}
                             or not isinstance(item.get("root"), str)
-                            or not item["root"].startswith("objects/")
+                            or not valid_processing_root(item["bucket"], item["root"])
                             or any(part in {"", ".", ".."} for part in item["root"].split("/"))
                             for item in resources):
         raise ValueError("processing roots require bucket-qualified resources")
+    timestamp = now_iso()
     return {"version": 1, "kind": "reader-processing-roots", "status": "processing",
             "operation": operation, "run": dict(run), "resources": resources,
-            "created_at": now_iso(), "updated_at": now_iso(),
+            "created_at": timestamp, "updated_at": timestamp, "heartbeat_at": timestamp,
             "release_policy": "explicit-publisher-handoff"}
+
+
+def heartbeat_processing(record: dict, now: str | None = None) -> dict:
+    """Refresh an active protection root without changing its ownership."""
+    if (record.get("kind") != "reader-processing-roots"
+            or record.get("status") not in {"processing", "uploaded", "published"}):
+        raise ValueError("processing record is not heartbeatable")
+    timestamp = now or now_iso()
+    return {**record, "heartbeat_at": timestamp, "updated_at": timestamp}
+
+
+@contextmanager
+def processing_heartbeat(record, persist, interval=900):
+    """Keep long transfers protected and surface failed heartbeat persistence."""
+    stop, errors = threading.Event(), []
+    def tick():
+        while not stop.wait(interval):
+            try:
+                persist(heartbeat_processing(record))
+            except Exception as error:
+                errors.append(error)
+                return
+    worker = threading.Thread(target=tick, name="reader-processing-heartbeat", daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join()
+    if errors:
+        raise RuntimeError("processing heartbeat persistence failed") from errors[0]
 
 
 def release_processing(record: dict, generation: str, now: str | None = None) -> dict:
@@ -60,8 +99,8 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
             for key, child in value.items():
                 if key == "processing_roots":
                     continue
-                if key in {"path", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
-                        and child.startswith("objects/"):
+                if key in {"path", "manifest", "o", "i", "w", "j", "ocr_manifest"} and isinstance(child, str) \
+                        and child.startswith(("objects/", "pages/image/")):
                     paths.add(child)
                 elif isinstance(child, (dict, list)):
                     visit(child)
@@ -74,7 +113,8 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
         raise ValueError("processing handoff has no resources")
     for resource in resources:
         root = resource.get("root", "") if isinstance(resource, dict) else ""
-        if not root.startswith("objects/") or not any(path.startswith(root + "/") for path in paths):
+        if not valid_processing_root(resource.get("bucket"), root) or not any(
+                path.startswith(root + "/") for path in paths):
             raise ValueError("processing root does not belong to the published result")
 
 
@@ -100,9 +140,11 @@ def catalog_generation(sidecar: dict, parent: dict | None = None,
         catalog = {"version": CATALOG_VERSION, "kind": "reader-catalog",
                    "current": parent.get("current"),
                    "generations": dict(parent.get("generations") or {})}
+        if parent.get("retired_generations"):
+            catalog["retired_generations"] = dict(parent["retired_generations"])
     previous = catalog.get("current") or {}
     parent_id = previous.get("generation") if isinstance(previous, dict) else None
-    catalog = compact_catalog(catalog, parent_id, now, 30)
+    catalog = compact_catalog(catalog, parent_id, now, 0)
     refs = sidecar_references(sidecar) if references is None else references
     normalized = sorted({(item["bucket"], item["path"]) for item in refs})
     digest = hashlib.sha256(json.dumps(sidecar, ensure_ascii=False, sort_keys=True,
@@ -146,7 +188,9 @@ def sidecar_references(sidecar: dict) -> list[dict]:
     return references
 
 
-def generation_live(entry: dict, current: str | None, now=None, grace_days: int = 30) -> bool:
+def generation_live(entry: dict, current: str | None, now=None, grace_days: int = 0) -> bool:
+    if grace_days < 0:
+        raise ValueError("generation grace cannot be negative")
     if entry.get("generation") == current or entry.get("status") == "current":
         return True
     if not isinstance(entry.get("superseded_at"), str):
@@ -157,14 +201,15 @@ def generation_live(entry: dict, current: str | None, now=None, grace_days: int 
             return True
     except (TypeError, ValueError):
         return True
-    clock = now or datetime.now(timezone.utc)
+    clock = datetime.fromisoformat(now.replace("Z", "+00:00")) if isinstance(now, str) else (
+        now or datetime.now(timezone.utc))
     if clock - superseded < timedelta(days=grace_days):
         return True
     acks = entry.get("replacement_acks")
     return not (isinstance(acks, dict) and acks.get("hf") is True and acks.get("pages") is True)
 
 
-def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 30) -> dict:
+def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: int = 0) -> dict:
     """Bound catalog history after supersession and both consumer acknowledgments."""
     if catalog.get("version") != CATALOG_VERSION or not isinstance(catalog.get("generations"), dict):
         raise ValueError("invalid Reader catalog")
@@ -172,7 +217,21 @@ def compact_catalog(catalog: dict, current: str | None, now=None, grace_days: in
         generation: entry for generation, entry in catalog["generations"].items()
         if generation == current or generation_live(entry, current, now, grace_days)
     }
-    return {**catalog, "generations": generations}
+    retired = dict(catalog.get("retired_generations") or {})
+    for generation, entry in catalog["generations"].items():
+        if generation not in generations:
+            retired[generation] = {
+                "replacement_generation": current,
+                "replacement_acks": dict(entry["replacement_acks"]),
+                "sidecar_sha256": entry.get("sidecar_sha256"),
+                "snapshot": entry.get("snapshot"),
+                "retired_at": now if isinstance(now, str) else (
+                    now.isoformat() if now else now_iso()),
+            }
+    result = {**catalog, "generations": generations}
+    if retired:
+        result["retired_generations"] = retired
+    return result
 
 
 def asset_record(result: dict) -> dict:

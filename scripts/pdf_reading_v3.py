@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 try:
@@ -23,6 +24,45 @@ BUCKETS = {shared.READER_ASSETS_BUCKET, shared.PDF_PAGES_BUCKET, shared.PDF_OCR_
 PARTITION_SIZE = 128
 SEARCH_PARTITION_PAGES = 32
 SEARCH_PARTITION_BYTES = 512 * 1024
+
+
+def validate_vector_svg(raw):
+    """Accept engine-exported, self-contained path SVGs, never active markup."""
+    if len(raw) > 8 * 1024 * 1024 or b"<!" in raw:
+        raise ValueError("invalid vector SVG size or declarations")
+    root = ET.fromstring(raw)
+    namespace = "http://www.w3.org/2000/svg"
+    allowed = {"svg", "defs", "path", "g", "use", "rect", "clipPath"}
+    if root.tag != f"{{{namespace}}}svg":
+        raise ValueError("not a vector SVG")
+    for element in root.iter():
+        if element.tag not in {f"{{{namespace}}}{tag}" for tag in allowed}:
+            raise ValueError("unsupported vector SVG element")
+        for name, value in element.attrib.items():
+            local = name.rsplit("}", 1)[-1].lower()
+            if local.startswith("on") or local == "style":
+                raise ValueError("active SVG attribute")
+            if local == "href" and not value.startswith("#"):
+                raise ValueError("external SVG dependency")
+            for match in re.finditer(r"url\((.*?)\)", value, re.I):
+                if not match[1].strip(" '\"").startswith("#"):
+                    raise ValueError("external SVG paint dependency")
+    dimensions = [float(root.attrib.get(name, "0").removesuffix("pt")) for name in ("width", "height")]
+    if any(not math.isfinite(number) or number <= 0 for number in dimensions):
+        raise ValueError("invalid SVG dimensions")
+    return dimensions
+
+
+def preview_geometry(raw, codec):
+    if codec == "svg":
+        return validate_vector_svg(raw)
+    from PIL import Image
+    import io
+    with Image.open(io.BytesIO(raw)) as image:
+        image.load()
+        if image.format.lower() != codec:
+            raise ValueError("preview format mismatch")
+        return list(image.size)
 
 
 def resource(value):
@@ -147,7 +187,7 @@ def validate_text_manifest(manifest):
     return manifest
 
 
-def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
+def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None, include_search=True):
     if not layers or [p["page"] for p in layers] != list(range(1, len(layers) + 1)):
         raise ValueError("text layers must cover every page")
     if len(raw_pages) != len(layers):
@@ -187,7 +227,7 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
                       "start": start, "end": end, "pages": chunk}, compressed=True)
         search_partitions.append({"start": start, "end": end, "resource": ref})
 
-    for layer in layers:
+    for layer in layers if include_search else []:
         page = {"page": layer["page"], "text": layer["text"], "text_generation": layer["generation"]}
         size = len(json.dumps(page, ensure_ascii=False).encode("utf-8"))
         if chunk and (len(chunk) >= SEARCH_PARTITION_PAGES or chunk_bytes + size > SEARCH_PARTITION_BYTES):
@@ -195,7 +235,8 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
             chunk, chunk_bytes = [], 0
         chunk.append(page)
         chunk_bytes += size
-    flush_search()
+    if chunk:
+        flush_search()
     book_text = stored(bundle / root / "text" / "book-text.json.gz", bundle,
                        {"version": 2, "kind": "pdf-book-text", "complete": True,
                         "source_sha256": source, "page_count": len(layers),
@@ -222,8 +263,9 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None):
     manifest = {"version": 1, "kind": "pdf-text-layer-index", "complete": True,
                 "source_sha256": source, "generation": generation, "page_count": len(layers),
                 "revision": revision, "quality": quality, "offset_unit": "unicode-codepoint",
-                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text,
-                "search_partitions": search_partitions}
+                "partitions": partitions, "review": review, "review_count": len(tasks), "book_text": book_text}
+    if include_search:
+        manifest["search_partitions"] = search_partitions
     if parent is not None:
         manifest["parent"] = resource(parent)
     validate_text_manifest(manifest)
@@ -415,8 +457,12 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
     end = count if end is None else end
     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= count:
         raise ValueError("invalid preview generation range")
-    recipe = text.digest({"source": source, "primary": spec["primary"], "dpi": dpi,
-                          "max_pixels": max_pixels, "webp_quality": 85, "policy": "mixed-preview-v1"})
+    vector = spec.get("vector_previews", False)
+    recipe_options = {"source": source, "primary": spec["primary"], "dpi": dpi,
+                      "max_pixels": max_pixels, "webp_quality": 85, "policy": "mixed-preview-v1"}
+    if vector:
+        recipe_options["vector_previews"] = "svg-paths-v1"
+    recipe = text.digest(recipe_options)
     root = Path("objects") / source[:2] / source / recipe[:16]
     generated = []
     with pymupdf.open(stream=raw, filetype="pdf") as document:
@@ -424,6 +470,26 @@ def generate_previews(spec, read, bundle, *, start=1, end=None, dpi=150, max_pix
             geometry = mapping["pages"][number - 1]
             if geometry["classification"] == "unknown":
                 raise ValueError("unknown page inspection requires retry before stream generation")
+            page = document[number - 1]
+            if vector and geometry["classification"] == "native-vector" and not page.get_image_info():
+                try:
+                    root_element = ET.fromstring(page.get_svg_image(text_as_path=True))
+                    root_element.insert(0, ET.Element("{http://www.w3.org/2000/svg}rect",
+                        {"width": "100%", "height": "100%", "fill": "white"}))
+                    encoded = ET.tostring(root_element, encoding="utf-8")
+                    width, height = validate_vector_svg(encoded)
+                except (ValueError, ET.ParseError):
+                    encoded = None
+                if encoded:
+                    path = bundle / root / "preview" / f"page-{number:06d}.svg"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(encoded)
+                    ref = {"bucket": shared.PDF_PAGES_BUCKET, "path": path.relative_to(bundle).as_posix(),
+                           "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded), "role": "runtime"}
+                    generated.append({"page": number, "page_identity": geometry["identity"], "codec": "svg",
+                        "width": math.ceil(width), "height": math.ceil(height), "resource": ref,
+                        "recipe": {"policy": "svg-paths-v1", "role": "preview-not-archival"}})
+                    continue
             protected = geometry["classification"] == "bitonal-image"
             requested_dpi = max(dpi, 300) if protected else dpi
             scale = min(requested_dpi / 72, math.sqrt(max_pixels / (geometry["width"] * geometry["height"])))
@@ -522,18 +588,15 @@ def build_reading(spec, read, bundle):
         if ref["bucket"] == shared.PDF_OCR_INPUT_BUCKET or ref["role"] != "runtime":
             raise ValueError("processing inputs are not published previews")
         codec = entry.get("codec")
-        if codec not in {"png", "webp", "jpeg"}:
+        if codec not in {"png", "webp", "jpeg", "svg"}:
             raise ValueError("unsupported preview codec")
         if geometry["classification"] in {"bitonal-image", "unknown"} and codec != "png":
             raise ValueError("protected pages require lossless preview encoding")
-        from PIL import Image
-        import io
-        with Image.open(io.BytesIO(verified_read(ref, read))) as image:
-            image.load()
-            if image.format.lower() != codec or list(image.size) != [entry["width"], entry["height"]]:
-                raise ValueError("preview codec or dimensions mismatch")
-            if abs((image.width / image.height) / (geometry["width"] / geometry["height"]) - 1) > .01:
-                raise ValueError("preview aspect ratio mismatch")
+        width, height = preview_geometry(verified_read(ref, read), codec)
+        if [math.ceil(width), math.ceil(height)] != [entry["width"], entry["height"]]:
+            raise ValueError("preview codec or dimensions mismatch")
+        if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
+            raise ValueError("preview aspect ratio mismatch")
     complete = seen == set(range(1, count + 1))
     if spec.get("require_complete_preview", False) and not complete:
         raise ValueError("incomplete whole-book preview")
@@ -614,16 +677,15 @@ def verify_reading(ref, read):
             media = resource(page["resource"])
             if media["bucket"] == shared.PDF_OCR_INPUT_BUCKET or media["role"] != "runtime":
                 raise ValueError("invalid runtime preview")
-            if page["codec"] not in {"png", "webp", "jpeg"}:
+            if page["codec"] not in {"png", "webp", "jpeg", "svg"}:
                 raise ValueError("unsupported preview codec")
             if geometry["classification"] in {"bitonal-image", "unknown"} and page["codec"] != "png":
                 raise ValueError("protected page has lossy preview")
-            with Image.open(io.BytesIO(verified_read(media, read))) as image:
-                image.load()
-                if image.format.lower() != page["codec"] or list(image.size) != [page["width"], page["height"]]:
-                    raise ValueError("preview format mismatch")
-                if abs((image.width / image.height) / (geometry["width"] / geometry["height"]) - 1) > .01:
-                    raise ValueError("preview geometry mismatch")
+            width, height = preview_geometry(verified_read(media, read), page["codec"])
+            if [math.ceil(width), math.ceil(height)] != [page["width"], page["height"]]:
+                raise ValueError("preview format mismatch")
+            if abs((width / height) / (geometry["width"] / geometry["height"]) - 1) > .01:
+                raise ValueError("preview geometry mismatch")
             seen.add(page["page"])
     if (preview["ready_pages"] != len(seen)
             or preview["complete"] != (seen == set(range(1, count + 1)))):
