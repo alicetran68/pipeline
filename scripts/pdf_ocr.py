@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -613,41 +614,51 @@ def render_page(path: Path, page: int, directory: Path,
     if not png.is_file():
         raise RuntimeError(f"page {page} render missing")
     from PIL import Image
-    with Image.open(png) as image:
-        width, height = image.size
-        rgb = image.convert("RGB")
-        if width * height > MAX_PAGE_PIXELS:
-            scale = (MAX_PAGE_PIXELS / (width * height)) ** 0.5
-            rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
-            width, height = rgb.size
-            rgb.save(png, "PNG")
-        if not reader_images:
-            rgb.close()
-            return png, width, height
-        if reader_pixels is None and not reader_jxl:
-            # Preserve the older single-stage profile's delivery bytes.
-            if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
-                scale = WEBP_MAX_DIMENSION / max(width, height)
-                resized = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+    previous_limit = Image.MAX_IMAGE_PIXELS
+    try:
+        # Poppler can emit a very large intermediate PNG even when the final
+        # Reader/OCR contract caps it at MAX_PAGE_PIXELS. Let Pillow open that
+        # intermediate so the explicit resize below enforces our bound instead
+        # of treating Pillow's generic decompression warning as a PDF failure.
+        Image.MAX_IMAGE_PIXELS = None
+        with warnings.catch_warnings(), Image.open(png) as image:
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            width, height = image.size
+            rgb = image.convert("RGB")
+            if width * height > MAX_PAGE_PIXELS:
+                scale = (MAX_PAGE_PIXELS / (width * height)) ** 0.5
+                rgb = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+                width, height = rgb.size
+                rgb.save(png, "PNG")
+            if not reader_images:
                 rgb.close()
-                rgb = resized
-        else:
-            scale = min(1.0, WEBP_MAX_DIMENSION / max(width, height)) if WEBP_MAX_DIMENSION else 1.0
-            if reader_pixels:
-                scale = min(scale, reader_pixels[0] / width, reader_pixels[1] / height)
-            if scale < 1:
-                reader_width, reader_height = max(1, int(width * scale)), max(1, int(height * scale))
+                return png, width, height
+            if reader_pixels is None and not reader_jxl:
+                # Preserve the older single-stage profile's delivery bytes.
+                if WEBP_MAX_DIMENSION and max(width, height) > WEBP_MAX_DIMENSION:
+                    scale = WEBP_MAX_DIMENSION / max(width, height)
+                    resized = rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))))
+                    rgb.close()
+                    rgb = resized
+            else:
+                scale = min(1.0, WEBP_MAX_DIMENSION / max(width, height)) if WEBP_MAX_DIMENSION else 1.0
                 if reader_pixels:
-                    reader_width = min(reader_width, reader_pixels[0])
-                    reader_height = min(reader_height, reader_pixels[1])
-                resized = rgb.resize((reader_width, reader_height), Image.Resampling.LANCZOS)
-                rgb.close()
-                rgb = resized
-        webp = prefix.with_suffix(".webp")
-        rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
-        if reader_jxl and rgb.size != (width, height):
-            rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
-        rgb.close()
+                    scale = min(scale, reader_pixels[0] / width, reader_pixels[1] / height)
+                if scale < 1:
+                    reader_width, reader_height = max(1, int(width * scale)), max(1, int(height * scale))
+                    if reader_pixels:
+                        reader_width = min(reader_width, reader_pixels[0])
+                        reader_height = min(reader_height, reader_pixels[1])
+                    resized = rgb.resize((reader_width, reader_height), Image.Resampling.LANCZOS)
+                    rgb.close()
+                    rgb = resized
+            webp = prefix.with_suffix(".webp")
+            rgb.save(webp, "WEBP", quality=reader_webp_quality(rgb, reader_pixels is not None), method=6)
+            if reader_jxl and rgb.size != (width, height):
+                rgb.save(prefix.with_name(prefix.name + "-reader").with_suffix(".png"), "PNG")
+            rgb.close()
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous_limit
     return png, width, height
 
 

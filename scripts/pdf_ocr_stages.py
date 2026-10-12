@@ -91,7 +91,6 @@ def retry(operation):
 
 def upload_objects(bundle: Path) -> list[str]:
     """Sync only one book's immutable prefix, never recursively list the whole bucket."""
-    api = HfApi(token=os.environ.get("HF_TOKEN"))
     records, roots = {}, []
     for root in sorted((bundle / "objects").glob("*/*/*")):
         if root.is_dir():
@@ -113,21 +112,40 @@ def upload_objects(bundle: Path) -> list[str]:
     # avoid two separate small-object uploads per book in central assembly.
     token = os.environ.get("HF_TOKEN")
     publish_json_batch(records, token)
+    def additions(root, relative, input_bucket=False):
+        result = []
+        for local in sorted(root.rglob("*")):
+            if not local.is_file():
+                continue
+            rel = local.relative_to(root)
+            if input_bucket:
+                if not (rel.parts[0] == "ocr-input" or (rel.parts[0] == "pages" and rel.suffix == ".jxl")):
+                    continue
+            else:
+                if rel.parts[0] == "ocr-input" or (rel.parts[0] == "pages" and rel.suffix == ".jxl"):
+                    continue
+                if not (rel.parts[0] in {"ocr", "text"}
+                        or (rel.parts[0] == "pages" and rel.suffix == ".webp")
+                        or rel.name in {"text-layer-manifest.json", "text-review-manifest.json",
+                                         "ocr-manifest.json", "page-manifest.json", "render-manifest.json"}
+                        or rel.name.startswith("render-range-") and rel.suffix == ".json"):
+                    continue
+            result.append((str(local), f"{relative}/{rel.as_posix()}"))
+        return result
+
     with ExitStack() as heartbeats:
         for path, record in records.items():
             heartbeats.enter_context(reader_lifecycle.processing_heartbeat(record,
                 lambda value, path=path: publish_json(path, value, token)))
         for root, relative in roots:
-            retry(lambda: api.sync_bucket(
-                    str(root), f"{BUCKET}/{relative}",
-                    include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
-                              "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
-                              "render-range-*.json"], quiet=True))
-            if any((root / "ocr-input").glob("*.png")) or any((root / "pages").glob("*.jxl")):
-                retry(lambda: api.sync_bucket(
-                    str(root), f"{OCR_INPUT_BUCKET}/{relative}",
-                      include=["ocr-input/**", "pages/*.jxl"], quiet=True,
-                      token=os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")))
+            pdf_additions = additions(root, relative)
+            if pdf_additions:
+                shared.batch_bucket_files_with_retry(shared.PDF_PAGES_BUCKET, pdf_additions, token)
+            input_additions = additions(root, relative, input_bucket=True)
+            if input_additions:
+                shared.batch_bucket_files_with_retry(
+                    shared.PDF_OCR_INPUT_BUCKET, input_additions,
+                    os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN"))
     uploaded = {path: {**reader_lifecycle.heartbeat_processing(record), "status": "uploaded"}
                 for path, record in records.items()}
     publish_json_batch(uploaded, token)
