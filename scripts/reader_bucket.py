@@ -2,6 +2,7 @@
 """Shared paths and readers for the unified Reader bucket index."""
 
 import json
+import copy
 import os
 import tempfile
 import gzip
@@ -10,8 +11,10 @@ import time
 from urllib.parse import quote
 from pathlib import Path
 
+import httpx
 from huggingface_hub import batch_bucket_files
 from huggingface_hub.utils import get_session, hf_raise_for_status
+from huggingface_hub.errors import HfHubHTTPError
 
 try:
     from .reader_assets import READER_ASSETS_BUCKET
@@ -46,7 +49,13 @@ def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     url = f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}"
     for attempt in range(6):
-        response = session.get(url, headers=headers, follow_redirects=True, timeout=120)
+        try:
+            response = session.get(url, headers=headers, follow_redirects=True, timeout=120)
+        except httpx.TransportError:
+            if attempt == 5:
+                raise
+            time.sleep(min(30, 2 ** attempt))
+            continue
         if response.status_code == 404:
             raise FileNotFoundError(path)
         if response.status_code in {408, 429, 500, 502, 503, 504} and attempt < 5:
@@ -120,7 +129,23 @@ def publish_indexes(payloads: dict[str, bytes], token: str | None = None) -> Non
             local.write_bytes(payload)
             additions.append((str(local), path))
         if additions:
-            batch_bucket_files(READER_ASSETS_BUCKET, add=additions, token=token)
+            for attempt in range(6):
+                try:
+                    batch_bucket_files(READER_ASSETS_BUCKET, add=additions, token=token)
+                    break
+                except HfHubHTTPError as error:
+                    if getattr(error.response, "status_code", None) not in {408, 429, 500, 502, 503, 504} or attempt == 5:
+                        raise
+                except httpx.TransportError:
+                    if attempt == 5:
+                        raise
+                time.sleep(min(30, 2 ** attempt))
+
+
+def publish_json_batch(payloads: dict[str, dict], token: str | None = None) -> None:
+    """Upload small protection/handoff records together without changing schemas."""
+    publish_indexes({path: (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+                     for path, value in payloads.items()}, token)
 
 
 def publish_catalog(sidecar: dict, token: str | None = None,
@@ -130,13 +155,19 @@ def publish_catalog(sidecar: dict, token: str | None = None,
         previous = read_json(INDEX_FILES["catalog"], token)
     except FileNotFoundError:
         previous = reader_lifecycle.empty_catalog()
-    catalog, generation = reader_lifecycle.catalog_generation(sidecar, previous, references)
+    catalog, generation = reader_lifecycle.catalog_generation(sidecar, copy.deepcopy(previous), references)
     snapshot = json.dumps(sidecar, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     snapshot_path = f"{INDEX_PREFIX}/generations/{generation}/reader_assets.json.gz"
     entry = catalog["generations"][generation]
     compressed = gzip.compress(snapshot, mtime=0)
     entry["snapshot"] = {"bucket": READER_ASSETS_BUCKET, "path": snapshot_path,
                          "sha256": hashlib.sha256(compressed).hexdigest(), "bytes": len(compressed)}
+    if catalog == previous:
+        try:
+            if read_bytes(snapshot_path, token) == compressed:
+                return generation
+        except FileNotFoundError:
+            pass
     publish_indexes({snapshot_path: compressed}, token)
     publish_json(INDEX_FILES["catalog"], catalog, token)
     return generation

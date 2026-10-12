@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext, closing
 from pathlib import Path
 from urllib.parse import quote
 
@@ -32,13 +32,13 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
     from .run_pdf_ocr import source_path, _bucket_retry_delay
-    from .reader_bucket import index_path, publish_bytes, publish_json, publish_catalog, read_json as read_bucket_json
+    from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
     import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
     import pdf_render_schedule
     import pdf_worker_lanes
     from run_pdf_ocr import source_path, _bucket_retry_delay
-    from reader_bucket import index_path, publish_bytes, publish_json, publish_catalog, read_json as read_bucket_json
+    from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
 RENDER_REGISTRY = "pdf_render_manifest.json"
 PROGRESS_REGISTRY = "pdf_ocr_progress.json"
@@ -92,7 +92,7 @@ def retry(operation):
 def upload_objects(bundle: Path) -> list[str]:
     """Sync only one book's immutable prefix, never recursively list the whole bucket."""
     api = HfApi(token=os.environ.get("HF_TOKEN"))
-    protection_paths = []
+    records, roots = {}, []
     for root in sorted((bundle / "objects").glob("*/*/*")):
         if root.is_dir():
             relative = root.relative_to(bundle).as_posix()
@@ -105,33 +105,41 @@ def upload_objects(bundle: Path) -> list[str]:
                 "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
             })
             protection_path = index_path(f"processing/{uuid.uuid4().hex}.json")
-            retry(lambda: publish_json(protection_path, record, os.environ.get("HF_TOKEN")))
-            protection_paths.append(protection_path)
-            with reader_lifecycle.processing_heartbeat(record,
-                    lambda value: publish_json(protection_path, value, os.environ.get("HF_TOKEN"))):
-                retry(lambda: api.sync_bucket(
+            records[protection_path] = record
+            roots.append((root, relative))
+    if not records:
+        return []
+    # Protect all prefixes before transferring any bytes. Batch metadata writes
+    # avoid two separate small-object uploads per book in central assembly.
+    token = os.environ.get("HF_TOKEN")
+    publish_json_batch(records, token)
+    with ExitStack() as heartbeats:
+        for path, record in records.items():
+            heartbeats.enter_context(reader_lifecycle.processing_heartbeat(record,
+                lambda value, path=path: publish_json(path, value, token)))
+        for root, relative in roots:
+            retry(lambda: api.sync_bucket(
                     str(root), f"{BUCKET}/{relative}",
                     include=["pages/*.webp", "ocr/**", "text/**", "text-layer-manifest.json", "text-review-manifest.json",
-                             "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
-                             "render-range-*.json"], quiet=True))
+                              "ocr-manifest.json", "page-manifest.json", "render-manifest.json",
+                              "render-range-*.json"], quiet=True))
+            if any((root / "ocr-input").glob("*.png")) or any((root / "pages").glob("*.jxl")):
                 retry(lambda: api.sync_bucket(
                     str(root), f"{OCR_INPUT_BUCKET}/{relative}",
-                     include=["ocr-input/**", "pages/*.jxl"], quiet=True,
-                     token=os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")))
-            record = reader_lifecycle.heartbeat_processing(record)
-            record.update(status="uploaded", updated_at=reader_lifecycle.now_iso())
-            retry(lambda: publish_json(protection_path, record, os.environ.get("HF_TOKEN")))
-    return protection_paths
+                      include=["ocr-input/**", "pages/*.jxl"], quiet=True,
+                      token=os.environ.get("HF_INPUT_TOKEN") or os.environ.get("HF_TOKEN")))
+    uploaded = {path: {**reader_lifecycle.heartbeat_processing(record), "status": "uploaded"}
+                for path, record in records.items()}
+    publish_json_batch(uploaded, token)
+    return list(records)
 
 
 def release_processing_roots(paths: list[str], generation: str, result: dict) -> None:
-    for path in paths:
-        if not path.startswith("reader-index/processing/"):
-            raise ValueError("invalid processing root path")
-        record = read_bucket_json(path, os.environ.get("HF_TOKEN"))
-        reader_lifecycle.validate_processing_handoff(record, result)
-        released = reader_lifecycle.release_processing(record, generation)
-        publish_json(path, released, os.environ.get("HF_TOKEN"))
+    token = os.environ.get("HF_TOKEN")
+    updates = reader_lifecycle.processing_handoffs([{**result, "processing_roots": paths}], generation,
+                                                  lambda path: read_bucket_json(path, token))
+    if updates:
+        publish_json_batch(updates, token)
 
 
 def handoff_worker_results(api, repo: str, results: list[dict]) -> None:
@@ -143,8 +151,7 @@ def handoff_worker_results(api, repo: str, results: list[dict]) -> None:
         return
     token = os.environ.get("HF_TOKEN")
     generation = publish_catalog(publication.load_sidecar(api, repo), token)
-    for result in protected:
-        release_processing_roots(result["processing_roots"], generation, result)
+    publication.release_processing_roots(protected, generation, token)
 
 
 def read_object(meta: dict, suffix: str | None = None) -> bytes:
@@ -152,17 +159,25 @@ def read_object(meta: dict, suffix: str | None = None) -> bytes:
     bucket = meta.get("bucket") or (
         shared.PDF_OCR_INPUT_BUCKET if "/ocr-input/" in path or path.endswith(".jxl")
         else shared.PDF_PAGES_BUCKET)
-    def download():
-        # Public object resolve avoids per-page bucket_info/paths-info API calls.
-        response = get_session().get(
-            f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
-            follow_redirects=True, timeout=120)
-        hf_raise_for_status(response)
-        return response.content
-    data = retry(download)
-    if len(data) != meta["bytes"] or hashlib.sha256(data).hexdigest() != meta["sha256"]:
-        raise ValueError(f"object checksum mismatch: {path}")
-    return data
+    if bucket not in {shared.PDF_PAGES_BUCKET, shared.PDF_OCR_INPUT_BUCKET}:
+        raise ValueError("invalid PDF object bucket")
+    for attempt in range(3):
+        def download():
+            # Public resolve avoids per-page metadata calls. Revalidate a short
+            # or stale response without relaxing the pinned size/SHA contract.
+            response = get_session().get(
+                f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}",
+                **({"headers": {"Cache-Control": "no-cache"}} if attempt else {}),
+                follow_redirects=True, timeout=120)
+            hf_raise_for_status(response)
+            return response.content
+        data = retry(download)
+        if len(data) == meta["bytes"] and hashlib.sha256(data).hexdigest() == meta["sha256"]:
+            return data
+        if attempt < 2:
+            print("PDF object identity mismatch; retrying verified read", flush=True)
+            time.sleep(2 ** (attempt + 1))
+    raise ValueError(f"object checksum mismatch: {path}")
 
 
 def page_meta(page: dict, field: str) -> dict:
@@ -351,6 +366,30 @@ def ocr_publication_is_current(previous, book):
                 and previous.get("page_count") == book.get("page_count")
                 and previous.get("render_manifest") == book.get("render_manifest")
                 and previous.get("page_manifest") == book.get("page_manifest"))
+
+
+def superseded_ocr_books(queue, rendered):
+    """Old artifacts cannot overwrite a newer render/native-text generation."""
+    superseded = set()
+    for book in queue["books"]:
+        latest = rendered.get(book["key"])
+        if not isinstance(latest, dict):
+            raise ValueError("OCR queue has no current render owner; retaining upload protection")
+        if (latest.get("status") != book.get("status") or not same_source(latest, book)
+                or any(latest.get(field) != book.get(field) for field in (
+                    "source_sha256", "render_profile", "render_manifest", "page_count", "page_manifest"))):
+            superseded.add(book["key"])
+    return superseded
+
+
+def filter_ocr_queue(queue, excluded):
+    shards = []
+    for shard in queue["shards"]:
+        records = shard["records"] if isinstance(shard, dict) else shard
+        remaining = [record for record in records if record["key"] not in excluded]
+        if remaining:
+            shards.append({**shard, "records": remaining} if isinstance(shard, dict) else remaining)
+    return {**queue, "books": [book for book in queue["books"] if book["key"] not in excluded], "shards": shards}
 
 
 def render_partition_matches(item, partition):
@@ -954,32 +993,13 @@ def assemble_book(book, saved, bundle):
         return {**base, "status": "failed", "error": "OCR pages incomplete; uploaded pages retained for retry"}
     texts, layers = [], []
     language, backend = pdf_ocr.book_ocr_config(book)
-    for page in pages:
-        payload = json.loads(gzip.decompress(read_object(page_meta(page, "o"), ".json.gz")))
-        if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
-                or payload.get("source") != page["source"]):
-            raise ValueError("OCR page payload mismatch")
-        config = book.get("layout_options", {})
-        options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
-        if page["source"] == "native":
-            # Native extraction is already in original page coordinates.
-            options.pop("rotation", None)
-            if payload["blocks"]:
-                payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options,
-                                                  include_writing_modes=True))
-            else:
-                payload["text_spans"] = []
-                payload["layout"] = {"version": ocr_layout.VERSION, "writing_mode": "auto",
-                                     "review": ["native-text-without-positioned-blocks"] if payload["text"] else [],
-                                     "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
-        raw_ref = {"bucket": shared.PDF_PAGES_BUCKET, **page_meta(page, "o"), "role": "provenance"}
-        layer = pdf_text_layer.from_page(payload, book["source_sha256"], language, raw_ref,
-                                         layout_options=options)
-        layers.append(layer)
-        texts.append({"page": page["p"], "text": payload["text"],
-                       "layout": payload["layout"], "text_spans": payload["text_spans"],
-                       "text_generation": layer["generation"], "quality": layer["quality"],
-                       "review_flags": layer["review_flags"]})
+    raw_pages = shared.ordered_reads(lambda page: read_object(page_meta(page, "o"), ".json.gz"), pages)
+    with closing(raw_pages):
+        for page, raw in zip(pages, raw_pages):
+            payload = json.loads(gzip.decompress(raw))
+            layer, page_text = assembled_page(book, page, payload, language)
+            layers.append(layer)
+            texts.append(page_text)
     root = root_for(book["source_sha256"], book["key"],
                     book["render_manifest"]["sha256"] + book["profile"] + "|text-layer-v2-search-partitions")
     text_layer_ref = pdf_reading_v3.build_text_bundle(layers, pages, root, bundle)
@@ -1008,6 +1028,85 @@ def assemble_book(book, saved, bundle):
             "backend": backend, "stream": bool(book.get("page_manifest")), "ocr_manifest": meta["path"],
             "ocr_manifest_sha256": meta["sha256"], "ocr_manifest_bytes": meta["bytes"],
             "text_layer": text_layer_ref, "text_revision": "raw", "text_quality": "unreviewed"}
+
+
+def assembled_page(book, page, payload, language):
+    if (payload.get("kind") != "pdf-ocr-page" or payload.get("page") != page["p"]
+            or payload.get("source") != page["source"]):
+        raise ValueError("OCR page payload mismatch")
+    config = book.get("layout_options", {})
+    options = {**config.get("default", {}), **config.get("pages", {}).get(str(page["p"]), {})}
+    if page["source"] == "native":
+        # Native extraction is already in original page coordinates.
+        options.pop("rotation", None)
+        if payload["blocks"]:
+            payload.update(ocr_layout.arrange(payload["blocks"], payload["width"], payload["height"], options,
+                                              include_writing_modes=True))
+        else:
+            payload["text_spans"] = []
+            payload["layout"] = {"version": ocr_layout.VERSION, "writing_mode": "auto",
+                                  "review": ["native-text-without-positioned-blocks"] if payload["text"] else [],
+                                  "mapping_precision": "block", "offset_unit": "unicode-codepoint"}
+    raw_ref = {"bucket": shared.PDF_PAGES_BUCKET, **page_meta(page, "o"), "role": "provenance"}
+    layer = pdf_text_layer.from_page(payload, book["source_sha256"], language, raw_ref, layout_options=options)
+    return layer, {"page": page["p"], "text": payload["text"], "layout": payload["layout"],
+                   "text_spans": payload["text_spans"], "text_generation": layer["generation"],
+                   "quality": layer["quality"], "review_flags": layer["review_flags"]}
+
+
+def publish_ocr_batches(books, updates, api, repo, output, batch_size=4):
+    """Commit complete books incrementally; a later interruption keeps prior batches."""
+    if type(batch_size) is not int or not 1 <= batch_size <= 20:
+        raise ValueError("publication batch size must be between 1 and 20")
+    report = {"version": 1, "kind": "pdf-ocr-publication-progress", "selected_books": len(books),
+              "batch_size": batch_size, "batches": [], "complete": False}
+    checkpoint = output / "publication.json"
+    def save_report():
+        pending = checkpoint.with_suffix(".pending.json")
+        pdf_ocr.write_json(pending, report)
+        os.replace(pending, checkpoint)
+    save_report()
+    for offset in range(0, len(books), batch_size):
+        started = time.monotonic()
+        selected = books[offset:offset + batch_size]
+        completed = []
+        with tempfile.TemporaryDirectory(dir=output) as directory:
+            bundle = Path(directory)
+            for book in selected:
+                try:
+                    saved = updates.get(book["key"], {}).get("pages", book.get("saved", {}))
+                    # A failed assembly must not leave an unowned prefix in the batch.
+                    with tempfile.TemporaryDirectory(dir=output) as temporary:
+                        result = assemble_book(book, saved, Path(temporary))
+                        if result["status"] == "ready":
+                            shutil.copytree(Path(temporary) / "objects", bundle / "objects", dirs_exist_ok=True)
+                    completed.append(result)
+                except Exception as exc:
+                    completed.append({**public_item({k: v for k, v in book.items() if k not in {"pages", "saved"}}),
+                                      "status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]})
+            assembly_seconds = time.monotonic() - started
+            roots = sorted((bundle / "objects").glob("*/*/*"))
+            paths = upload_objects(bundle)
+            if len(roots) != len(paths):
+                raise ValueError("assembled upload protection coverage mismatch")
+            protected = {root.relative_to(bundle).as_posix(): path for root, path in zip(roots, paths)}
+            for result in completed:
+                if result.get("status") == "ready":
+                    result["processing_roots"] = [protected[str(Path(result["ocr_manifest"]).parent)]]
+            # The publisher checks every uploaded manifest, page and search
+            # partition before registry/catalog promotion. Do not duplicate reads.
+            publication.publish(api, repo, completed)
+        batch = {"offset": offset, "books": len(selected),
+                 "ready": sum(r.get("status") == "ready" for r in completed),
+                 "failed": sum(r.get("status") == "failed" for r in completed),
+                 "assembly_seconds": round(assembly_seconds, 3),
+                 "total_seconds": round(time.monotonic() - started, 3)}
+        report["batches"].append(batch)
+        save_report()
+        print("pdf_publication " + json.dumps(batch, sort_keys=True), flush=True)
+    report["complete"] = True
+    save_report()
+    return report
 
 
 def read_results(paths):
@@ -1070,11 +1169,14 @@ def main():
     parser.add_argument("--retry-failed-only", action="store_true")
     parser.add_argument("--results", type=Path, nargs="*", default=[])
     parser.add_argument("--results-dir", type=Path)
+    parser.add_argument("--publish-batch-size", type=int, default=4)
     parser.add_argument("--search-data", type=Path, default=Path("output/search_data.json"))
     parser.add_argument("--revisions", type=Path, default=Path("state/commits.json"))
     parser.add_argument("--layout-overrides", type=Path, default=Path("state/pdf_ocr_layout.json"))
     parser.add_argument("--assets-repo", default="vomebook/Reader-Assets")
     args = parser.parse_args()
+    if not 1 <= args.publish_batch_size <= 20:
+        parser.error("--publish-batch-size must be between 1 and 20")
     worker_config = None
     if args.worker_lane:
         if args.stage not in {"plan-render", "plan-ocr"} or args.partition != "all":
@@ -1193,48 +1295,30 @@ def main():
         raise ValueError("invalid stage queue")
     if args.stage == "publish-ocr":
         results = read_results(result_paths(args.results, args.results_dir, bool(queue["shards"])))
+        superseded = superseded_ocr_books(queue, load_registry(api, repo, RENDER_REGISTRY)["files"])
+        if superseded:
+            queue = filter_ocr_queue(queue, superseded)
+            results = [result for result in results if result.get("key") not in superseded]
+            print(f"ocr publication: ignored {len(superseded)} superseded render queues; upload roots retained", flush=True)
+            if not queue["books"]:
+                pdf_ocr.write_json(args.output / "publication.json", {
+                    "version": 1, "kind": "pdf-ocr-publication-progress", "selected_books": 0,
+                    "superseded_books": len(superseded), "batches": [], "complete": True})
+                return 0
         current = load_registry(api, repo, publication.OCR_MANIFEST_NAME)["files"]
         current_books = {book["key"] for book in queue["books"]
                          if ocr_publication_is_current(current.get(book["key"]), book)}
         if current_books:
-            queue = {**queue,
-                     "books": [book for book in queue["books"] if book["key"] not in current_books],
-                     "shards": [{**shard, "records": [record for record in shard["records"]
-                                                         if record["key"] not in current_books]}
-                                for shard in queue["shards"]]}
+            queue = filter_ocr_queue(queue, current_books)
             results = [result for result in results if result.get("key") not in current_books]
-            queue["shards"] = [shard for shard in queue["shards"] if shard["records"]]
             if not queue["books"]:
                 print(f"ocr publication: skipped {len(current_books)} already-ready books", flush=True)
                 return 0
         updates = collect_progress(queue, results)
         save_registry(api, repo, PROGRESS_REGISTRY, updates, merge_progress)
-        completed = []
-        for book in queue["books"]:
-            try:
-                saved = updates.get(book["key"], {}).get("pages", book.get("saved", {}))
-                with tempfile.TemporaryDirectory(dir=args.output) as temp:
-                    result = assemble_book(book, saved, Path(temp))
-                    if result["status"] == "ready":
-                        result["processing_roots"] = upload_objects(Path(temp))
-                        published_manifest = json.loads(read_object({
-                            "path": result["ocr_manifest"], "sha256": result["ocr_manifest_sha256"],
-                            "bytes": result["ocr_manifest_bytes"]}, "/ocr-manifest.json"))
-                        if (published_manifest.get("complete") is not True
-                                or published_manifest.get("page_count") != book["page_count"]):
-                            raise ValueError("uploaded OCR manifest is incomplete")
-                        published_text = json.loads(gzip.decompress(read_object(published_manifest["book_text"])))
-                        if (published_text.get("complete") is not True
-                                or len(published_text.get("pages", [])) != book["page_count"]):
-                            raise ValueError("uploaded OCR text is incomplete")
-                completed.append(result)
-            except Exception as exc:
-                completed.append({**public_item({k: v for k, v in book.items() if k not in {"pages", "saved"}}),
-                                  "status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]})
-        if completed:
-            publication.publish(api, repo, completed)
+        publish_ocr_batches(queue["books"], updates, api, repo, args.output, args.publish_batch_size)
         handoff_worker_results(api, repo, results)
-        print(f"published {len(completed)} books; incomplete books retain page progress", flush=True)
+        print(f"published {len(queue['books'])} book states; incomplete books retain page progress", flush=True)
         return 0
     if not 0 <= args.shard < len(queue["shards"]):
         raise ValueError("invalid shard")

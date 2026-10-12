@@ -272,7 +272,8 @@ def build_text_bundle(layers, raw_pages, root, bundle, *, parent=None, include_s
     return stored(bundle / root / "text-layer-manifest.json", bundle, manifest)
 
 
-def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=False, page_geometries=None):
+def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=False, page_geometries=None,
+                       read_workers=1):
     manifest = validate_text_manifest(decode(verified_read(ref, read)))
     if manifest["source_sha256"] != source_sha256 or manifest["page_count"] != page_count:
         raise ValueError("text layer index source mismatch")
@@ -286,8 +287,10 @@ def verify_text_bundle(ref, read, source_sha256, page_count, *, verify_evidence=
                 or data.get("start") != partition["start"] or data.get("end") != partition["end"]
                 or [p["page"] for p in data["pages"]] != list(range(partition["start"], partition["end"] + 1))):
             raise ValueError("invalid text partition identity")
-        for entry in data["pages"]:
-            layer = text.validate(decode(verified_read(entry["resource"], read)))
+        loaded = shared.ordered_reads(lambda entry: decode(verified_read(entry["resource"], read)),
+                                      data["pages"], read_workers)
+        for entry, payload in zip(data["pages"], loaded):
+            layer = text.validate(payload)
             if (layer["page"] != entry["page"] or layer["source_sha256"] != source_sha256
                     or layer["generation"] != entry["generation"] or layer["page_identity"] != entry["page_identity"]
                     or layer["processing"] != entry["processing"] or layer["quality"] != entry["quality"]):

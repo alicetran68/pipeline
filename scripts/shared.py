@@ -6,6 +6,8 @@ import os
 import random
 import time
 from collections.abc import Callable
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TypeVar
 
@@ -15,6 +17,34 @@ PDF_OCR_INPUT_BUCKET = "melsm/pdf-archive-v2"
 READER_ASSETS_BUCKET = "vomebook/reader-assets-v2"
 
 T = TypeVar("T")
+
+
+def ordered_reads(operation, items, workers: int = 4):
+    """Read in source order, retaining/submitting at most ``workers`` objects."""
+    if type(workers) is not int or not 1 <= workers <= 8:
+        raise ValueError("read workers must be between 1 and 8")
+    iterator = iter(items)
+    exhausted = object()
+    if workers == 1:
+        for item in iterator:
+            yield operation(item)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = deque()
+        try:
+            for _ in range(workers):
+                item = next(iterator, exhausted)
+                if item is exhausted:
+                    break
+                pending.append(pool.submit(operation, item))
+            while pending:
+                yield pending.popleft().result()
+                item = next(iterator, exhausted)
+                if item is not exhausted:
+                    pending.append(pool.submit(operation, item))
+        finally:
+            for future in pending:
+                future.cancel()
 
 
 def hash_file(path: Path) -> tuple[str, int]:

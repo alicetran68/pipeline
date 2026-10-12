@@ -10,8 +10,10 @@ import json
 import threading
 try:
     from .shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
+    from .shared import ordered_reads
 except ImportError:
     from shared import READER_ASSETS_BUCKET, PDF_PAGES_BUCKET, PDF_OCR_INPUT_BUCKET
+    from shared import ordered_reads
 
 LIFECYCLE_VERSION = 1
 LIFECYCLE_NAME = "reader_lifecycle.json"
@@ -116,6 +118,26 @@ def validate_processing_handoff(record: dict, result: dict) -> None:
         if not valid_processing_root(resource.get("bucket"), root) or not any(
                 path.startswith(root + "/") for path in paths):
             raise ValueError("processing root does not belong to the published result")
+
+
+def processing_handoffs(results, generation, read):
+    """Validate every owner before batching releases; never release foreign roots."""
+    owners = {}
+    for result in results:
+        for path in result.get("processing_roots", []):
+            if (not isinstance(path, str) or not path.startswith("reader-index/processing/")
+                    or any(part in {"", ".", ".."} for part in path.split("/"))):
+                raise ValueError("invalid processing root path")
+            owners.setdefault(path, []).append(result)
+    paths = sorted(owners)
+    updates = {}
+    for path, record in zip(paths, ordered_reads(read, paths)):
+        for result in owners[path]:
+            validate_processing_handoff(record, result)
+        released = release_processing(record, generation)
+        if released != record:
+            updates[path] = released
+    return updates
 
 
 def empty_catalog() -> dict:

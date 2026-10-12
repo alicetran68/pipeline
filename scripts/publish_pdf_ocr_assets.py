@@ -18,7 +18,7 @@ try:
     from . import pdf_ocr, shared, reader_lifecycle
     from .reader_assets import READER_ASSETS_REPO
     from .reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
-                                publish_json, read_json as read_bucket_json,
+                                publish_json, publish_json_batch, read_json as read_bucket_json,
                                 read_bytes as read_bucket_bytes)
 except ImportError:
     import pdf_ocr
@@ -26,7 +26,7 @@ except ImportError:
     import reader_lifecycle
     from reader_assets import READER_ASSETS_REPO
     from reader_bucket import (INDEX_FILES, publish_catalog, publish_indexes,
-                               publish_json, read_json as read_bucket_json,
+                               publish_json, publish_json_batch, read_json as read_bucket_json,
                                read_bytes as read_bucket_bytes)
 
 
@@ -96,14 +96,10 @@ def update_sidecar(sidecar: dict, results: list[dict]) -> dict:
 
 
 def release_processing_roots(results: list[dict], generation: str, token: str | None) -> None:
-    for result in results:
-        for path in result.get("processing_roots", []):
-            if not isinstance(path, str) or not path.startswith("reader-index/processing/"):
-                raise ValueError("invalid processing root path")
-            record = read_bucket_json(path, token)
-            reader_lifecycle.validate_processing_handoff(record, result)
-            released = reader_lifecycle.release_processing(record, generation)
-            publish_json(path, released, token)
+    updates = reader_lifecycle.processing_handoffs(results, generation,
+                                                  lambda path: read_bucket_json(path, token))
+    if updates:
+        publish_json_batch(updates, token)
 
 
 def published(current: dict, results: list[dict]) -> bool:
@@ -158,7 +154,7 @@ def verify_ready_objects(result: dict) -> None:
             raise ValueError("published text layer reference mismatch")
         def read(ref):
             return read_bucket_bytes(ref["path"], token, bucket=ref["bucket"])
-        verify_text_bundle(manifest["text_layer"], read, result["source_sha256"], count)
+        verify_text_bundle(manifest["text_layer"], read, result["source_sha256"], count, read_workers=4)
 
 
 def publish(api: HfApi, repo: str, results: list[dict], attempts: int = 20) -> None:
