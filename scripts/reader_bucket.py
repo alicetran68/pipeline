@@ -7,6 +7,7 @@ import os
 import tempfile
 import gzip
 import hashlib
+import random
 import time
 from urllib.parse import quote
 from pathlib import Path
@@ -48,7 +49,11 @@ def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_
     session = get_session()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     url = f"https://huggingface.co/buckets/{bucket}/resolve/{quote(path, safe='/')}"
-    for attempt in range(6):
+    # Resolver quotas are account-wide and a PDF OCR wave can exhaust the
+    # five-minute window while this process is waiting in the publication
+    # queue. Keep retrying through the window instead of converting a
+    # temporary 429 into a false missing-root/publication failure.
+    for attempt in range(12):
         try:
             response = session.get(url, headers=headers, follow_redirects=True, timeout=120)
         except httpx.TransportError:
@@ -58,13 +63,13 @@ def read_bytes(path: str, token: str | None = None, bucket: str = READER_ASSETS_
             continue
         if response.status_code == 404:
             raise FileNotFoundError(path)
-        if response.status_code in {408, 429, 500, 502, 503, 504} and attempt < 5:
-            retry_after = response.headers.get("retry-after")
+        if response.status_code in {408, 425, 429, 500, 502, 503, 504} and attempt < 11:
+            retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
             try:
-                delay = min(60, max(1, int(retry_after))) if retry_after else min(30, 2 ** attempt)
+                delay = min(300, max(1, int(float(retry_after)))) if retry_after else min(120, 2 ** attempt)
             except ValueError:
-                delay = min(30, 2 ** attempt)
-            time.sleep(delay)
+                delay = min(120, 2 ** attempt)
+            time.sleep(delay + random.uniform(0, 1.5))
             continue
         hf_raise_for_status(response)
         return response.content
@@ -96,6 +101,39 @@ def stage_index(root: Path, name: str, payload: bytes | str) -> Path:
     return path
 
 
+def _publish_additions(additions: list[tuple[str, str]], token: str | None = None,
+                       max_attempts: int = 12) -> None:
+    """Publish bucket metadata while absorbing account-wide HF/Xet throttling."""
+    for attempt in range(max_attempts):
+        try:
+            batch_bucket_files(READER_ASSETS_BUCKET, add=additions, token=token)
+            return
+        except Exception as error:
+            response = getattr(error, "response", None)
+            status = getattr(response, "status_code", None)
+            text = str(error).lower()
+            retryable = (
+                status in {408, 425, 429, 500, 502, 503, 504}
+                or "too many requests" in text
+                or "xet-write-token" in text
+                or "timeout" in text
+                or isinstance(error, (ConnectionError, TimeoutError, httpx.TransportError))
+            )
+            if not retryable or attempt + 1 == max_attempts:
+                raise
+            headers = getattr(response, "headers", {}) or {}
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                delay = max(0, min(300, int(float(retry_after)))) if retry_after else min(120, 2 ** attempt)
+            except (TypeError, ValueError):
+                delay = min(120, 2 ** attempt)
+            delay += random.uniform(0, 3)
+            print(f"transient Reader index upload error ({status or type(error).__name__}); "
+                  f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})", flush=True)
+            time.sleep(delay)
+    raise RuntimeError("Reader index upload retry limit reached")
+
+
 def publish_json(path: str, payload: dict, token: str | None = None) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix="reader-bucket-index-", suffix=".json")
     os.close(descriptor)
@@ -103,7 +141,7 @@ def publish_json(path: str, payload: dict, token: str | None = None) -> None:
     try:
         local.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
                          encoding="utf-8")
-        batch_bucket_files(READER_ASSETS_BUCKET, add=[(str(local), path)], token=token)
+        _publish_additions([(str(local), path)], token)
     finally:
         local.unlink(missing_ok=True)
 
@@ -113,7 +151,7 @@ def publish_bytes(path: str, payload: bytes, token: str | None = None) -> None:
     local = Path(temporary)
     try:
         local.write_bytes(payload)
-        batch_bucket_files(READER_ASSETS_BUCKET, add=[(str(local), path)], token=token)
+        _publish_additions([(str(local), path)], token)
     finally:
         local.unlink(missing_ok=True)
 
@@ -129,17 +167,7 @@ def publish_indexes(payloads: dict[str, bytes], token: str | None = None) -> Non
             local.write_bytes(payload)
             additions.append((str(local), path))
         if additions:
-            for attempt in range(6):
-                try:
-                    batch_bucket_files(READER_ASSETS_BUCKET, add=additions, token=token)
-                    break
-                except HfHubHTTPError as error:
-                    if getattr(error.response, "status_code", None) not in {408, 429, 500, 502, 503, 504} or attempt == 5:
-                        raise
-                except httpx.TransportError:
-                    if attempt == 5:
-                        raise
-                time.sleep(min(30, 2 ** attempt))
+            _publish_additions(additions, token)
 
 
 def publish_json_batch(payloads: dict[str, dict], token: str | None = None) -> None:

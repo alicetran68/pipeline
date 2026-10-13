@@ -95,7 +95,7 @@ def hf_retry_delay(attempt: int, cap: int = 60, max_shift: int = 5) -> int:
 
 
 def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]], token: str | None,
-                                  *, max_attempts: int = 8) -> None:
+                                  *, max_attempts: int = 12) -> None:
     """Upload a bucket batch with bounded retry for HF/Xet throttling."""
     from huggingface_hub import batch_bucket_files
 
@@ -116,7 +116,14 @@ def batch_bucket_files_with_retry(bucket: str, additions: list[tuple[str, str]],
             )
             if not retryable or attempt + 1 == max_attempts:
                 raise
-            delay = min(300, hf_retry_delay(attempt, cap=120) + random.uniform(0, 3))
+            headers = getattr(response, "headers", {}) or {}
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                delay = max(0, min(300, int(float(retry_after)))) if retry_after else hf_retry_delay(
+                    attempt, cap=120)
+            except (TypeError, ValueError):
+                delay = hf_retry_delay(attempt, cap=120)
+            delay = min(300, delay + random.uniform(0, 3))
             print(f"transient HF bucket upload error ({status or type(error).__name__}); "
                   f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})", flush=True)
             time.sleep(delay)

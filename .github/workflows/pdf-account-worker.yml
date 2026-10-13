@@ -92,7 +92,10 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 4
+      # All account lanes publish into the same HF buckets. Four shards per
+      # account multiplied across the eight repositories exhausts the shared
+      # resolver/Xet quotas before the serialized central publisher runs.
+      max-parallel: 1
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shard_ids) }}
     steps:
