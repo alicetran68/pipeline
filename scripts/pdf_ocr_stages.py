@@ -31,12 +31,14 @@ from huggingface_hub.utils import get_session, hf_raise_for_status
 
 try:
     from . import pdf_ocr, pdf_assets, lin_pdf_text, pdf_render_schedule, pdf_worker_lanes, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
+    from . import pdf_ocr_progress
     from .run_pdf_ocr import source_path, _bucket_retry_delay
     from .reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 except ImportError:
     import pdf_ocr, pdf_assets, lin_pdf_text, plan_pdf_ocr, publish_pdf_ocr_assets as publication, shared, ocr_layout, reader_lifecycle, pdf_text_layer, pdf_reading_v3
     import pdf_render_schedule
     import pdf_worker_lanes
+    import pdf_ocr_progress
     from run_pdf_ocr import source_path, _bucket_retry_delay
     from reader_bucket import index_path, publish_bytes, publish_json, publish_json_batch, publish_catalog, read_json as read_bucket_json
 
@@ -975,6 +977,26 @@ def recognize_task(task, bundle):
     return {"key": task["key"], "generation": task["generation"], "pages": done, "errors": errors}
 
 
+def load_ocr_progress(api, repo, revision=None):
+    """Per-book checkpoints after migration; the legacy registry only before it."""
+    if type(api) is HfApi:
+        store = pdf_ocr_progress.ProgressStore(os.environ.get("HF_TOKEN"))
+        if store.exists():
+            return store
+    return load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
+
+
+def save_ocr_progress(api, repo, updates):
+    if type(api) is not HfApi:
+        save_registry(api, repo, PROGRESS_REGISTRY, updates, merge_progress)
+        return
+    token = os.environ.get("HF_TOKEN")
+    store = pdf_ocr_progress.ProgressStore(token)
+    # Runs under reader-sidecar: never load/rewrite the whole legacy registry.
+    pdf_ocr_progress.ensure_migrated(store, token)
+    store.save(updates, merge_progress)
+
+
 def merge_progress(old, new):
     pages = dict((old or {}).get("pages", {})) if (old or {}).get("generation") == new["generation"] else {}
     pages.update(new["pages"])
@@ -1236,7 +1258,7 @@ def main():
                 rendered = {item["key"]: item for item in pdf_worker_lanes.select_records(
                     worker_config, [{**entry, "key": key} for key, entry in rendered.items()],
                     args.worker_lane, args.worker_owner)}
-            progress = load_registry(api, repo, PROGRESS_REGISTRY, revision)["files"]
+            progress = load_ocr_progress(api, repo, revision)
             overrides = json.loads(args.layout_overrides.read_text(encoding="utf-8")) if args.layout_overrides.is_file() else {}
             queue = plan_images(rendered, current, progress, args.limit,
                                 plan_pdf_ocr.ocr_target_pages_per_shard(), overrides,
@@ -1333,7 +1355,7 @@ def main():
                 print(f"ocr publication: skipped {len(current_books)} already-ready books", flush=True)
                 return 0
         updates = collect_progress(queue, results)
-        save_registry(api, repo, PROGRESS_REGISTRY, updates, merge_progress)
+        save_ocr_progress(api, repo, updates)
         publish_ocr_batches(queue["books"], updates, api, repo, args.output, args.publish_batch_size)
         handoff_worker_results(api, repo, results)
         print(f"published {len(queue['books'])} book states; incomplete books retain page progress", flush=True)
