@@ -112,6 +112,37 @@ class OcrProgressStoreTests(unittest.TestCase):
         self.assertEqual(store.get("book", {}).get("generation"), "g")
         self.assertEqual(store.get("other", {}).get("pages", {}), {})
 
+    def retire(self, bucket, current):
+        def download(target, token=None):
+            target.write_bytes(current)
+            return ("d" * 64 if current == self.original else "e" * 64), len(current)
+        with patch.object(progress, "download_legacy", side_effect=download):
+            return progress.retire_legacy(bucket.store())
+
+    def test_legacy_root_is_tombstoned_only_when_unchanged_since_migration(self):
+        files = {"book": {"generation": "g", "pages": {"1": page(1)}}}
+        self.original = self.legacy(files)
+        changed = MemoryBucket()
+        self.migrate(changed, self.original)
+        self.assertEqual(self.retire(changed, self.legacy({**files, "late": files["book"]})), "legacy-changed")
+        self.assertNotIn(index_path(progress.LEGACY), changed.objects)
+        bucket = MemoryBucket()
+        self.migrate(bucket, self.original)
+        self.assertEqual(self.retire(bucket, self.original), "retired")
+        stone = json.loads(bucket.objects[index_path(progress.LEGACY)])
+        self.assertEqual(stone["files"], {})
+        self.assertEqual(stone["migrated"]["books"], 1)
+        self.assertTrue(is_root(index_path(progress.LEGACY)))
+        self.assertTrue(bucket.store().index()["legacy_retired"])
+        self.assertEqual(bucket.store().get("book"), files["book"])
+        self.assertEqual(self.retire(bucket, self.original), "not-applicable")
+        # Tombstone written but index flag lost: recognized, not treated as a change.
+        flag_lost = MemoryBucket()
+        self.migrate(flag_lost, self.original)
+        self.assertEqual(self.retire(flag_lost, progress.encode_json(progress.tombstone(
+            flag_lost.store().index()["migrated_from"]))), "retired")
+        self.assertTrue(flag_lost.store().index()["legacy_retired"])
+
 
 if __name__ == "__main__":
     unittest.main()

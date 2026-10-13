@@ -995,6 +995,8 @@ def save_ocr_progress(api, repo, updates):
     # Runs under reader-sidecar: never load/rewrite the whole legacy registry.
     pdf_ocr_progress.ensure_migrated(store, token)
     store.save(updates, merge_progress)
+    # GC parses every reader-index root; drop the multi-GB legacy copy once proven identical.
+    pdf_ocr_progress.retire_legacy(store, token)
 
 
 def merge_progress(old, new):

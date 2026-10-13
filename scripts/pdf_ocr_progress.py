@@ -223,6 +223,46 @@ def migrate_legacy(store: ProgressStore, directory: Path, token=None) -> dict:
     return index["migrated_from"] or {"books": 0, "pages": 0}
 
 
+def tombstone(migrated: dict) -> dict:
+    # Keeps the legacy registry schema (empty ``files``) so old readers and the
+    # GC graph accept it; every reference now lives in the per-book shards.
+    return {"version": 1, "kind": "pdf-ocr-progress-legacy-tombstone", "files": {},
+            "superseded_by": index_path(INDEX),
+            "migrated": {key: migrated[key] for key in ("sha256", "bytes", "books", "pages")}}
+
+
+def retire_legacy(store: ProgressStore, token=None) -> str:
+    """Replace the multi-GB legacy root only if it is byte-identical to the migrated one."""
+    index = store.index()
+    migrated = (index or {}).get("migrated_from")
+    if not migrated or index.get("legacy_retired"):
+        return "not-applicable"
+    with tempfile.TemporaryDirectory(prefix="ocr-progress-retire-") as directory:
+        local = Path(directory) / "legacy.json"
+        identity = download_legacy(local, token)
+        already = (identity is not None and identity[1] < 1024 * 1024
+                   and json.loads(local.read_bytes()).get("kind") == tombstone(migrated)["kind"])
+    if identity is None:
+        return "legacy-missing"
+    if already:
+        # A previous run wrote the tombstone but not the index flag.
+        updated = {**index, "legacy_retired": True}
+        store._write({index_path(INDEX): encode_json(updated)})
+        store._index = updated
+        return "retired"
+    if identity != (migrated["sha256"], migrated["bytes"]):
+        # Changed after migration: references may be missing from shards. Keep it.
+        print("legacy OCR progress changed after migration; not retired", flush=True)
+        return "legacy-changed"
+    updated = {**index, "legacy_retired": True}
+    store._write({index_path(LEGACY): encode_json(tombstone(migrated))})
+    store._write({index_path(INDEX): encode_json(updated)})
+    store._index = updated
+    print("ocr progress legacy registry retired " + json.dumps(
+        {k: migrated[k] for k in ("bytes", "books", "pages")}, sort_keys=True), flush=True)
+    return "retired"
+
+
 def ensure_migrated(store: ProgressStore, token=None) -> None:
     if store.exists():
         return
